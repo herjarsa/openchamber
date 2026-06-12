@@ -38,7 +38,7 @@ import {
   getDirectoryState,
 } from "./sync-refs"
 import { markSessionViewed } from "./notification-store"
-import { setActiveSession } from "./sync-context"
+import { setActiveSession } from "./active-session"
 import {
   createSession as createSessionAction,
   deleteSession as deleteSessionAction,

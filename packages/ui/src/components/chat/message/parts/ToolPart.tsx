@@ -2660,8 +2660,8 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
         handleMainClick(event);
     };
 
-    const iconStyle = !isTaskTool && isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
-    const titleStyle = !isTaskTool && isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
+    const iconStyle = isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
+    const titleStyle = isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
     const shouldRenderExpandedContent = useAnimatedExpandedContent(isExpanded);
 
     if (!shouldTreatAsFinalized && !isActive && !isTaskTool) {
