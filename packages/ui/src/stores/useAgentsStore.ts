@@ -15,7 +15,13 @@ import { invalidateCommandsLoadCache, useCommandsStore } from "@/stores/useComma
 import { useProjectsStore } from "@/stores/useProjectsStore";
 import { useSkillsCatalogStore } from "@/stores/useSkillsCatalogStore";
 import { invalidateSkillsLoadCache, useSkillsStore } from "@/stores/useSkillsStore";
-import { runtimeFetch } from "@/lib/runtime-fetch";
+import {
+  fetchAgentConfig,
+  createAgentConfig,
+  updateAgentConfig,
+  deleteAgentConfig,
+  reloadConfig,
+} from '@/lib/api/configApi';
 
 // Note: useDirectoryStore cannot be imported at top level to avoid circular dependency
 // useDirectoryStore -> useAgentsStore (for refreshAfterOpenCodeRestart)
@@ -243,25 +249,16 @@ export const useAgentsStore = create<AgentsStore>()(
 
             for (let attempt = 0; attempt < 3; attempt++) {
               try {
-                const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
-
                 // Ensure we list agents using the correct project context
                 const agents = await opencodeClient.withDirectory(configDirectory, () => opencodeClient.listAgents());
 
                 const agentsWithScope = await Promise.all(
                   agents.map(async (agent) => {
                     try {
-                      // Force no-cache to ensure we get the latest scope info
-                      const response = await runtimeFetch(`/api/config/agents/${encodeURIComponent(agent.name)}${queryParams}`, {
-                        headers: {
-                          'Cache-Control': 'no-cache',
-                          ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
-                        }
-                      });
+                      // Fetch per-agent config (scope, sources, group) using the config API
+                      const data = await fetchAgentConfig(agent.name, configDirectory);
 
-                      if (response.ok) {
-                        const data = await response.json();
-
+                      if (data) {
                         // Prioritize explicit scope from server response
                         let scope = data.scope;
 
@@ -339,30 +336,18 @@ export const useAgentsStore = create<AgentsStore>()(
             console.log('[AgentsStore] Agent config to save:', agentConfig);
 
             const configDirectory = getConfigDirectory();
-            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
-
-            const response = await runtimeFetch(`/api/config/agents/${encodeURIComponent(config.name)}${queryParams}`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
-              },
-              body: JSON.stringify(agentConfig)
-            });
-
-            const payload = await response.json().catch(() => null);
-            if (!response.ok) {
-              const message = payload?.error || 'Failed to create agent';
-              throw new Error(message);
+            const result = await createAgentConfig(config.name, agentConfig, configDirectory);
+            if (!result.ok) {
+              throw new Error(result.error || 'Failed to create agent');
             }
 
-            const needsReload = payload?.requiresReload ?? true;
+            const needsReload = result.requiresReload ?? true;
             invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
-                message: payload?.message,
-                delayMs: payload?.reloadDelayMs,
+                message: result.message,
+                delayMs: result.reloadDelayMs,
                 scopes: ["agents"],
                 mode: "projects",
               });
@@ -401,30 +386,18 @@ export const useAgentsStore = create<AgentsStore>()(
 
             // Use active project root for project-level agent support.
             const configDirectory = getConfigDirectory();
-            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
-
-            const response = await runtimeFetch(`/api/config/agents/${encodeURIComponent(name)}${queryParams}`, {
-              method: 'PATCH',
-              headers: {
-                'Content-Type': 'application/json',
-                ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
-              },
-              body: JSON.stringify(agentConfig)
-            });
-
-            const payload = await response.json().catch(() => null);
-            if (!response.ok) {
-              const message = payload?.error || 'Failed to update agent';
-              throw new Error(message);
+            const result = await updateAgentConfig(name, agentConfig, configDirectory);
+            if (!result.ok) {
+              throw new Error(result.error || 'Failed to update agent');
             }
 
-            const needsReload = payload?.requiresReload ?? true;
+            const needsReload = result.requiresReload ?? true;
             invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
-                message: payload?.message,
-                delayMs: payload?.reloadDelayMs,
+                message: result.message,
+                delayMs: result.reloadDelayMs,
                 scopes: ["agents"],
                 mode: "projects",
               });
@@ -452,26 +425,18 @@ export const useAgentsStore = create<AgentsStore>()(
           try {
             // Use active project root for project-level agent support.
             const configDirectory = getConfigDirectory();
-            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
-
-            const response = await runtimeFetch(`/api/config/agents/${encodeURIComponent(name)}${queryParams}`, {
-              method: 'DELETE',
-              headers: configDirectory ? { 'x-opencode-directory': configDirectory } : undefined,
-            });
-
-            const payload = await response.json().catch(() => null);
-            if (!response.ok) {
-              const message = payload?.error || 'Failed to delete agent';
-              throw new Error(message);
+            const result = await deleteAgentConfig(name, configDirectory);
+            if (!result.ok) {
+              throw new Error(result.error || 'Failed to delete agent');
             }
 
-            const needsReload = payload?.requiresReload ?? true;
+            const needsReload = result.requiresReload ?? true;
             invalidateAgentsLoadCache(configDirectory);
             if (needsReload) {
               requiresReload = true;
               await refreshAfterOpenCodeRestart({
-                message: payload?.message,
-                delayMs: payload?.reloadDelayMs,
+                message: result.message,
+                delayMs: result.reloadDelayMs,
                 scopes: ["agents"],
                 mode: "projects",
               });
@@ -688,17 +653,10 @@ export async function reloadOpenCodeConfiguration(options?: {
 
   try {
 
-    const response = await runtimeFetch('/api/config/reload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    const payload = await response.json().catch(() => null);
-
-    if (!response.ok) {
-      const message = payload?.error || 'Failed to reload configuration';
-      throw new Error(message);
-    }
+            const result = await reloadConfig();
+            if (!result.ok) {
+              throw new Error(result.error || 'Failed to reload configuration');
+            }
 
     const refreshOptions = {
       ...options,
@@ -706,11 +664,11 @@ export async function reloadOpenCodeConfiguration(options?: {
       mode: options?.mode ?? "projects",
     };
 
-    if (payload?.requiresReload) {
+            if (result.requiresReload) {
       await refreshAfterOpenCodeRestart({
         ...refreshOptions,
-        message: payload.message,
-        delayMs: payload.reloadDelayMs,
+              message: result.message,
+              delayMs: result.reloadDelayMs,
       });
     } else {
       await refreshAfterOpenCodeRestart(refreshOptions);
