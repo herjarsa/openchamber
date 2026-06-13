@@ -48,8 +48,8 @@ type DesktopServicesMenuProps = {
   isDesktopServicesOpen: boolean;
   setIsDesktopServicesOpen: React.Dispatch<React.SetStateAction<boolean>>;
   refreshCurrentInstanceLabel: () => Promise<void>;
-  desktopServicesTab: 'instance' | 'usage' | 'mcp' | 'plugin-status';
-  setDesktopServicesTab: React.Dispatch<React.SetStateAction<'instance' | 'usage' | 'mcp' | 'plugin-status'>>;
+  desktopServicesTab: 'instance' | 'usage' | 'mcp' | 'plugin-status' | null;
+  setDesktopServicesTab: React.Dispatch<React.SetStateAction<'instance' | 'usage' | 'mcp' | 'plugin-status' | null>>;
   quotaResultsLength: number;
   fetchAllQuotas: () => Promise<unknown>;
   servicesTabItems: SortableTabsStripItem[];
@@ -227,7 +227,7 @@ export const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
 
         {desktopServicesTab === 'plugin-status' ? (
 	  			<div className="max-h-[60vh] overflow-y-auto px-2 py-2">
-						<PluginStatusPage />
+						<PluginStatusPage onClose={() => setDesktopServicesTab(null)} />
 					</div>
         ) : null}
         {desktopServicesTab === 'usage' ? (

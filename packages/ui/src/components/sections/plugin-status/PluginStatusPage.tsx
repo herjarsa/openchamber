@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useInputStore } from '@/sync/input-store';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { useI18n } from '@/lib/i18n';
@@ -32,11 +33,16 @@ interface PluginStatusItem {
   command: string;
 }
 
+interface PluginStatusPageProps {
+  onClose?: () => void;
+}
+
 const STATUS_BG_CLASS: Record<PluginStatus, string> = {
   ok: 'bg-[var(--status-success-background)]',
   warning: 'bg-[var(--status-warning-background)]',
   error: 'bg-[var(--status-error-background)]',
 };
+
 function StatusIcon({ status }: { status: PluginStatus }) {
   switch (status) {
     case 'ok':
@@ -50,7 +56,7 @@ function StatusIcon({ status }: { status: PluginStatus }) {
   }
 }
 
-export function PluginStatusPage() {
+export function PluginStatusPage({ onClose }: PluginStatusPageProps) {
   const { t } = useI18n();
   const directory = useDirectoryStore((state) => state.currentDirectory ?? null);
   const [items, setItems] = useState<PluginStatusItem[]>([]);
@@ -91,6 +97,7 @@ export function PluginStatusPage() {
       cancelled = true;
     };
   }, [directory]);
+
   const handleCopyCommand = async (command: string) => {
     const ok = await copyTextToClipboard(command);
     if (ok) {
@@ -100,9 +107,18 @@ export function PluginStatusPage() {
     }
   };
 
-  const handleSendToChat = (command: string) => {
+  const handleSendToChat = async (command: string) => {
+    const homeDirectory = useDirectoryStore.getState().homeDirectory;
+    const opencodeConfigDir = homeDirectory ? `${homeDirectory}/.config/opencode` : '';
+    const session = await useSessionUIStore.getState().createSession(undefined, opencodeConfigDir || null, null);
+    if (!session) {
+      toast.error(t('settings.pluginStatus.toast.createSessionFailed'));
+      return;
+    }
+    await useSessionUIStore.getState().setCurrentSession(session.id, opencodeConfigDir || null);
     useInputStore.getState().setPendingInputText(command, 'append');
     setSelected(null);
+    onClose?.();
   };
 
   const statusCounts = useMemo(() => {
@@ -145,6 +161,7 @@ export function PluginStatusPage() {
       </div>
     );
   }
+
   return (
     <div className="flex h-full flex-col">
       <header className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
@@ -237,7 +254,7 @@ export function PluginStatusPage() {
                   <Icon name="file-copy" className="mr-1 h-4 w-4" />
                   {t('settings.pluginStatus.dialog.copy')}
                 </Button>
-                <Button onClick={() => handleSendToChat(selected.command)}>
+                <Button onClick={() => void handleSendToChat(selected.command)}>
                   <Icon name="chat-thread" className="mr-1 h-4 w-4" />
                   {t('settings.pluginStatus.dialog.sendToChat')}
                 </Button>

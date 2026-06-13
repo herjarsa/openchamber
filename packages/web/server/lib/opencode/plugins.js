@@ -455,8 +455,7 @@ async function getStatusForEntry(entry, directory) {
           status = 'error';
           error = info.error || `Registry lookup failed (status ${info.status})`;
         } else if (parsed.version !== null && !isExactSemver(parsed.version)) {
-          status = 'warning';
-          error = 'Version spec is not exact semver';
+          status = 'ok';
         } else if (parsed.version !== null && isExactSemver(parsed.version) && !info.versions.includes(parsed.version)) {
           status = 'error';
           error = `Version ${parsed.version} not found in registry`;

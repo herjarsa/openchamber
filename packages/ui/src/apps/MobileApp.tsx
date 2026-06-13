@@ -1002,7 +1002,7 @@ const MobileShell: React.FC = () => {
             headerless
 >
             <ErrorBoundary>
-              <PluginStatusPage />
+	            <PluginStatusPage onClose={() => setPluginStatusOpen(false)} />
             </ErrorBoundary>
           </MobileSurfaceShell>
         ) : null}

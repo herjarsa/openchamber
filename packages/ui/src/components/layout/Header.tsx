@@ -349,9 +349,9 @@ export const Header: React.FC<HeaderProps> = ({
 		() => formatCompactHeaderLabel(currentInstanceLabel),
 		[currentInstanceLabel],
 	);
-	const [desktopServicesTab, setDesktopServicesTab] = React.useState<
-    "instance" | "usage" | "mcp" | "plugin-status"
-  >(isDesktopApp ? "instance" : "usage");
+  const [desktopServicesTab, setDesktopServicesTab] = React.useState<
+    "instance" | "usage" | "mcp" | "plugin-status" | null
+>(isDesktopApp ? "instance" : "usage");
 	const [mobileServicesTab, setMobileServicesTab] = React.useState<
     "usage" | "mcp" | "plugin-status"
   >("usage");
@@ -1604,9 +1604,9 @@ export const Header: React.FC<HeaderProps> = ({
 			if (eventMatchesShortcut(e, cycleServicesCombo)) {
 				e.preventDefault();
 
-				const tabValues = servicesTabs.map((tab) => tab.value) as Array<
-          "instance" | "usage" | "mcp" | "plugin-status"
-        >;
+        const tabValues = servicesTabs.map((tab) => tab.value) as Array<
+          "instance" | "usage" | "mcp" | "plugin-status" | null
+>;
 				if (tabValues.length === 0) {
 					return;
 				}
@@ -2155,7 +2155,7 @@ export const Header: React.FC<HeaderProps> = ({
 
                   {mobileServicesTab === "plugin-status" && (
                     <div className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(4rem+env(safe-area-inset-bottom))] px-2 py-2">
-                      <PluginStatusPage />
+                      <PluginStatusPage onClose={() => setIsMobileRateLimitsOpen(false)} />
                     </div>
                   )}
 									{mobileServicesTab === "usage" && (

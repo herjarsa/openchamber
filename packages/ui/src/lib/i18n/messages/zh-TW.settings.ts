@@ -1802,4 +1802,5 @@
   'settings.pluginStatus.dialog.copy': 'Copy',
   'settings.pluginStatus.dialog.sendToChat': 'Send to chat',
   'settings.pluginStatus.toast.copied': 'Command copied to clipboard',
+  'settings.pluginStatus.toast.createSessionFailed': 'Failed to create session',
 } as const;
