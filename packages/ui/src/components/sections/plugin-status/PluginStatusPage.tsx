@@ -35,6 +35,7 @@ interface PluginStatusItem {
 
 interface PluginStatusPageProps {
   onClose?: () => void;
+  showHeader?: boolean;
 }
 
 const STATUS_BG_CLASS: Record<PluginStatus, string> = {
@@ -56,7 +57,7 @@ function StatusIcon({ status }: { status: PluginStatus }) {
   }
 }
 
-export function PluginStatusPage({ onClose }: PluginStatusPageProps) {
+export function PluginStatusPage({ onClose, showHeader = true }: PluginStatusPageProps) {
   const { t } = useI18n();
   const directory = useDirectoryStore((state) => state.currentDirectory ?? null);
   const [items, setItems] = useState<PluginStatusItem[]>([]);
@@ -133,12 +134,16 @@ export function PluginStatusPage({ onClose }: PluginStatusPageProps) {
 
   const title = t('settings.pluginStatus.title');
 
+  const header = showHeader ? (
+    <header className="border-b border-[var(--border)] px-5 py-4">
+      <h1 className="text-lg font-semibold">{title}</h1>
+    </header>
+  ) : null;
+
   if (loading) {
     return (
       <div className="flex h-full flex-col">
-        <header className="border-b border-[var(--border)] px-5 py-4">
-          <h1 className="text-lg font-semibold">{title}</h1>
-        </header>
+        {header}
         <div className="flex flex-1 items-center justify-center">
           <Icon name="loader-4" className="h-6 w-6 animate-spin text-[var(--muted-foreground)]" />
           <span className="ml-2 text-[var(--muted-foreground)]">{t('settings.pluginStatus.loading')}</span>
@@ -150,9 +155,7 @@ export function PluginStatusPage({ onClose }: PluginStatusPageProps) {
   if (error) {
     return (
       <div className="flex h-full flex-col">
-        <header className="border-b border-[var(--border)] px-5 py-4">
-          <h1 className="text-lg font-semibold">{title}</h1>
-        </header>
+        {header}
         <div className="flex flex-1 flex-col items-center justify-center px-5 text-center">
           <Icon name="error-warning" className="h-8 w-8 text-[var(--status-error)]" />
           <p className="mt-2 text-[var(--muted-foreground)]">{t('settings.pluginStatus.error')}</p>
@@ -164,6 +167,7 @@ export function PluginStatusPage({ onClose }: PluginStatusPageProps) {
 
   return (
     <div className="flex h-full flex-col">
+      {header}
       <header className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
         <h1 className="text-lg font-semibold">{title}</h1>
         {items.length > 0 && (
