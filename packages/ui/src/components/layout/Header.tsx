@@ -6,8 +6,9 @@ import { Icon } from "@/components/icon/Icon";
 import type { IconName } from "@/components/icon/icons";
 import { DiffIcon } from "@/components/icons/DiffIcon";
 import { McpIcon } from "@/components/icons/McpIcon";
-import { ProjectActionsButton } from "@/components/layout/ProjectActionsButton";
 import { McpDropdownContent } from "@/components/mcp/McpDropdown";
+import { ProjectActionsButton } from "@/components/layout/ProjectActionsButton";
+import { PluginStatusPage } from "@/components/sections/plugin-status/PluginStatusPage";
 import { PaceIndicator } from "@/components/sections/usage/PaceIndicator";
 import { UsageProgressBar } from "@/components/sections/usage/UsageProgressBar";
 import { SessionSwitcherDropdown } from "@/components/session/SessionSwitcherDropdown";
@@ -349,11 +350,11 @@ export const Header: React.FC<HeaderProps> = ({
 		[currentInstanceLabel],
 	);
 	const [desktopServicesTab, setDesktopServicesTab] = React.useState<
-		"instance" | "usage" | "mcp"
-	>(isDesktopApp ? "instance" : "usage");
+    "instance" | "usage" | "mcp" | "plugin-status"
+  >(isDesktopApp ? "instance" : "usage");
 	const [mobileServicesTab, setMobileServicesTab] = React.useState<
-		"usage" | "mcp"
-	>("usage");
+    "usage" | "mcp" | "plugin-status"
+  >("usage");
 	useEffect(() => {
 		if (!isDesktopApp && desktopServicesTab === "instance") {
 			setDesktopServicesTab("usage");
@@ -1432,29 +1433,33 @@ export const Header: React.FC<HeaderProps> = ({
 		}
 	}, [activeMainTab, isMobile, setActiveMainTab]);
 
-	const servicesTabs = React.useMemo(() => {
-		const base: Array<{
-			value: "instance" | "usage" | "mcp";
-			label: string;
-			icon: React.ReactNode;
-		}> = [];
-		if (isDesktopApp) {
+  const servicesTabs = React.useMemo(() => {
+    const base: Array<{
+      value: "instance" | "usage" | "mcp" | "plugin-status";
+      label: string;
+      icon: React.ReactNode;
+    }> = [];
+    if (isDesktopApp) {
+      base.push({
+        value: "instance",
+        label: t("layout.services.instance"),
+        icon: <Icon name="server" className="h-3.5 w-3.5" />,
+      });
+    }
 			base.push({
-				value: "instance",
-				label: t("layout.services.instance"),
-				icon: <Icon name="server" className="h-3.5 w-3.5" />,
-			});
-		}
-		base.push(
-			{
-				value: "usage",
-				label: t("layout.services.usage"),
-				icon: <Icon name="timer" className="h-3.5 w-3.5" />,
-			},
-			{ value: "mcp", label: "MCP", icon: <McpIcon className="h-3.5 w-3.5" /> },
-		);
-		return base;
-	}, [isDesktopApp, t]);
+        value: "usage",
+        label: t("layout.services.usage"),
+        icon: <Icon name="timer" className="h-3.5 w-3.5" />,
+      },
+      { value: "mcp", label: "MCP", icon: <McpIcon className="h-3.5 w-3.5" /> },
+      {
+        value: "plugin-status",
+        label: t('mobile.menu.pluginStatus'),
+        icon: <Icon name="pulse" className="h-3.5 w-3.5" />,
+      },
+    );
+    return base;
+  }, [isDesktopApp, t]);
 
 	const servicesTabItems = React.useMemo(() => {
 		return servicesTabs.map((tab) => ({
@@ -1600,8 +1605,8 @@ export const Header: React.FC<HeaderProps> = ({
 				e.preventDefault();
 
 				const tabValues = servicesTabs.map((tab) => tab.value) as Array<
-					"instance" | "usage" | "mcp"
-				>;
+          "instance" | "usage" | "mcp" | "plugin-status"
+        >;
 				if (tabValues.length === 0) {
 					return;
 				}
@@ -2114,16 +2119,16 @@ export const Header: React.FC<HeaderProps> = ({
 												<SortableTabsStrip
 													items={mobileServicesTabItems}
 													activeId={mobileServicesTab}
-													onSelect={(tabID) => {
-														const value = tabID as "usage" | "mcp";
-														setMobileServicesTab(value);
-														if (
-															value === "usage" &&
-															quotaResults.length === 0
-														) {
-															fetchAllQuotas();
-														}
-													}}
+														onSelect={(tabID) => {
+                const value = tabID as "usage" | "mcp" | "plugin-status";
+                setMobileServicesTab(value);
+                if (
+                  value === "usage" &&
+                  quotaResults.length === 0
+                ) {
+                  fetchAllQuotas();
+                }
+              }}
 													layoutMode="fit"
 													variant="active-pill"
 													activePillInsetClassName="gap-0.5 px-px py-0"
@@ -2142,14 +2147,17 @@ export const Header: React.FC<HeaderProps> = ({
 										</div>
 									</div>
 
-									{mobileServicesTab === "mcp" && (
-										<McpDropdownContent
-											active={
-												isMobileRateLimitsOpen && mobileServicesTab === "mcp"
-											}
-										/>
-									)}
+											{mobileServicesTab === "mcp" && (
+												<McpDropdownContent
+													active={isMobileRateLimitsOpen && mobileServicesTab === "mcp"}
+          />
+											)}
 
+                  {mobileServicesTab === "plugin-status" && (
+                    <div className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(4rem+env(safe-area-inset-bottom))] px-2 py-2">
+                      <PluginStatusPage />
+                    </div>
+                  )}
 									{mobileServicesTab === "usage" && (
 										<div className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(4rem+env(safe-area-inset-bottom))]">
 											{/* Mobile usage header */}

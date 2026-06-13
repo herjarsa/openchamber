@@ -41,6 +41,7 @@ export const dict = {
   'mobile.menu.files': 'Files',
   'mobile.menu.changes': 'Changes',
   'mobile.menu.mcp': 'MCP',
+  'mobile.menu.pluginStatus': 'Plugin Status',
   'mobile.menu.update': 'Update',
   'mobile.menu.settings': 'Settings',
   'mobile.sessions.newChatCta': 'New chat in {project}',
