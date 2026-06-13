@@ -33,6 +33,7 @@ import { useConfigStore } from "@/stores/useConfigStore"
 import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
+import { subagentNotificationBatcher } from './subagent-notification-batcher'
 import { applyGlobalSessionStatusEvent } from "./global-session-status"
 import type { State } from "./types"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
@@ -49,7 +50,6 @@ import { listGlobalSessionPages } from "@/stores/globalSessions"
 import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
 import { assertSdkSuccess } from "./sdk-utils"
 import { isActiveSession, getActiveSession } from "./active-session"
-import { useSessionUIStore } from "./session-ui-store"
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ function isRecentBoot() {
 }
 
 
-function findParentToolPartForSubagent(
+export function findParentToolPartForSubagent(
   subagentSessionID: string,
   state: State,
 ): { parentSessionID: string; parentMessageID: string; parentPartID: string } | null {
@@ -1471,47 +1471,31 @@ function handleEvent(
     const session = sessionID ? storeState.session.find((s) => s.id === sessionID) : undefined
     const isSubtask = Boolean(session && (session as { parentID?: string }).parentID)
 
-    // For subtask turn-complete: skip — only surface the parent.
-    // For subtask error: always surface — a subagent failure is critical context
-    // the user needs even when the parent is the active session.
-    if (sessionID && (!isSubtask || payload.type === "session.error")) {
-      let parentRefs:
-        | { parentSessionID: string; parentMessageID: string; parentPartID: string }
-        | null = null
-
-      // For subagent errors, locate the parent tool row so the toast can navigate
-      // back to the failed task in the parent session.
-      if (isSubtask && payload.type === "session.error") {
-        parentRefs = findParentToolPartForSubagent(sessionID, storeState)
-      }
-
-      appendNotification({
-        directory: resolvedDirectory,
-        session: sessionID,
-        time: Date.now(),
-        viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
-        ...(payload.type === "session.error"
-          ? { type: "error" as const, error: props.error, ...parentRefs }
-          : { type: "turn-complete" as const }),
-      })
-
-      // Surface subagent failures as a clickable toast that jumps to the parent row.
-      if (isSubtask && payload.type === "session.error" && parentRefs) {
-        const errorMessage = props.error?.message ?? "Subagent failed"
-        toast.error(`Subagent error: ${errorMessage}`, {
-          description: "Click to open the parent session and highlight the failed task.",
-          duration: 10000,
-          action: {
-            label: "Show",
-            onClick: () => {
-              openSessionFromToast(parentRefs.parentSessionID, resolvedDirectory)
-              useSessionUIStore.getState().setSubagentErrorFocusTarget({
-                sessionId: parentRefs.parentSessionID,
-                messageId: parentRefs.parentMessageID,
-                partId: parentRefs.parentPartID,
-              })
-            },
+    if (sessionID) {
+      if (isSubtask) {
+        // Route subtask events to the batcher — it groups and emits consolidated
+        // notifications for sibling subagents.
+        subagentNotificationBatcher.queue(
+          {
+            directory: resolvedDirectory,
+            sessionID,
+            parentID: (session as { parentID?: string }).parentID!,
+            type: payload.type === "session.error" ? "error" : "idle",
+            ...(payload.type === "session.error" ? { error: props.error } : {}),
+            time: Date.now(),
           },
+          () => store.getState(),
+        )
+      } else {
+        // Non-subtask sessions use the existing notification flow unchanged.
+        appendNotification({
+          directory: resolvedDirectory,
+          session: sessionID,
+          time: Date.now(),
+          viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
+          ...(payload.type === "session.error"
+            ? { type: "error" as const, error: props.error }
+            : { type: "turn-complete" as const }),
         })
       }
     }
