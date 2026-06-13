@@ -19,7 +19,6 @@ import { CommandsPage } from '@/components/sections/commands/CommandsPage';
 import { McpSidebar } from '@/components/sections/mcp/McpSidebar';
 import { McpPage } from '@/components/sections/mcp/McpPage';
 import { PluginsSidebar, PluginsPage } from '@/components/sections/plugins';
-import { PluginStatusPage } from '@/components/sections/plugin-status';
 import { usePluginsStore } from '@/stores/usePluginsStore';
 import { SkillsSidebar } from '@/components/sections/skills/SkillsSidebar';
 import { SkillsPage } from '@/components/sections/skills/SkillsPage';
@@ -794,8 +793,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <McpPage />;
       case 'plugins':
         return <PluginsPage />;
-      case 'plugin-status':
-        return <PluginStatusPage onClose={onClose} />;
       case 'skills.installed':
         return <SkillsPage view="installed" />;
       case 'skills.catalog':

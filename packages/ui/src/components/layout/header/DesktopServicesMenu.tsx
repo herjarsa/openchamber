@@ -227,7 +227,7 @@ export const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
 
         {desktopServicesTab === 'plugin-status' ? (
 	  			<div className="max-h-[60vh] overflow-y-auto px-2 py-2">
-						<PluginStatusPage onClose={() => setDesktopServicesTab(null)} />
+            <PluginStatusPage onClose={() => setDesktopServicesTab(null)} showHeader={false} />
 					</div>
         ) : null}
         {desktopServicesTab === 'usage' ? (
