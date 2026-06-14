@@ -51,6 +51,7 @@ import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useMobileSessionExpansionStore } from '@/stores/useMobileSessionExpansionStore';
 import { useMobileSessionTreeStore } from '@/stores/useMobileSessionTreeStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useUIStore } from '@/stores/useUIStore';
 import { orderWorktrees, useWorktreeOrderStore } from '@/stores/useWorktreeOrderStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useAllLiveSessions } from '@/sync/sync-context';
@@ -522,6 +523,7 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const worktreeOrderByProject = useWorktreeOrderStore((state) => state.orderByProject);
   const expandedParents = useMobileSessionExpansionStore((state) => state.expandedParents);
   const toggleParent = useMobileSessionExpansionStore((state) => state.toggleParent);
+  const showSubagentSessionsInSidebar = useUIStore((state) => state.showSubagentSessionsInSidebar);
   const [query, setQuery] = React.useState('');
   const [editingProjectId, setEditingProjectId] = React.useState<string | null>(null);
   const [confirmingArchiveSessionId, setConfirmingArchiveSessionId] = React.useState<string | null>(null);
@@ -626,8 +628,11 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
     for (const session of liveSessions) {
       if (!seenIds.has(session.id)) merged.push(session);
     }
+    if (!showSubagentSessionsInSidebar) {
+      return merged.filter((session) => !getParentId(session));
+    }
     return merged;
-  }, [globalActiveSessions, liveSessions]);
+  }, [globalActiveSessions, liveSessions, showSubagentSessionsInSidebar]);
 
   const normalizedQuery = query.trim().toLowerCase();
 
