@@ -102,8 +102,8 @@ export const buildGroupedSessions = (
   const archivedKey = '__archived__';
 
 const getGroupKey = (session: Session) => {
-    if (session.time?.archived) return archivedKey;
-    if (args.isVSCode) return normalizedProjectRoot ?? '__project_root__';
+if (session.time?.archived) return archivedKey;
+if (args.isVSCode) return normalizedProjectRoot ?? '__project_root__';
 const metadataPath = normalizePath(args.worktreeMetadata.get(session.id)?.path ?? null);
 const normalizedDir = metadataPath ?? resolveGlobalSessionDirectory(session);
 if (!normalizedDir) return archivedKey;

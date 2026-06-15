@@ -313,7 +313,7 @@ export const useKeyboardShortcuts = () => {
           return;
         }
 
-        const tabs: RightSidebarTab[] = ['git', 'files', 'context', 'subagents'];
+        const tabs: RightSidebarTab[] = ['git', 'files', 'context'];
         const currentIndex = tabs.indexOf(rightSidebarTab);
         const nextTab = tabs[(currentIndex + 1) % tabs.length];
 
