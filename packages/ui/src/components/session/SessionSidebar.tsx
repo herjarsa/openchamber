@@ -43,7 +43,7 @@ import { SidebarProjectsList } from './sidebar/SidebarProjectsList';
 import { SessionNodeItem } from './sidebar/SessionNodeItem';
 import { useUpdateStore } from '@/stores/useUpdateStore';
 import { useShallow } from 'zustand/react/shallow';
-import { listProjectWorktrees } from '@/lib/worktrees/worktreeManager';
+import { listProjectWorktrees, refreshAllProjectWorktrees } from '@/lib/worktrees/worktreeManager';
 import type { WorktreeMetadata } from '@/types/worktree';
 import type { SortableDragHandleProps } from './sidebar/sortableItems';
 import {
@@ -443,6 +443,15 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     };
   }, [projectWorktreeDiscoveryKey]);
 
+  // Refresh worktrees when the window regains focus (detects externally-created worktrees)
+  React.useEffect(() => {
+    const handleFocus = () => {
+      void refreshAllProjectWorktrees();
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
   React.useEffect(() => {
     let refreshTimeout: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = subscribeOpenchamberEvents((event) => {
@@ -829,6 +838,23 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return [...directories].sort();
   }, [availableWorktreesByProject, isVSCode, normalizedProjects]);
 
+  const handleRefreshProject = React.useCallback((projectId: string) => {
+    const project = normalizedProjects.find((p) => p.id === projectId);
+    if (!project?.normalizedPath) {
+      return;
+    }
+    const directories = [project.normalizedPath];
+    const worktrees = availableWorktreesByProject.get(project.normalizedPath) ?? [];
+    for (const worktree of worktrees) {
+      const path = normalizePath(worktree.path);
+      if (path) {
+        directories.push(path);
+      }
+    }
+    void refreshGlobalSessionsForDirectories(directories, syncSessionsSnapshotRef.current);
+    void useSessionFoldersStore.getState().refreshFolders();
+  }, [normalizedProjects, availableWorktreesByProject]);
+
   const knownProjectSessionDirectoriesRef = React.useRef<Set<string> | null>(null);
   React.useEffect(() => {
     const nextDirectories = new Set(projectSessionDirectories);
@@ -944,6 +970,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     setSessionSwitcherOpen,
     sessions,
     worktreeMetadata,
+    hasLoadedGlobalSessions,
   });
 
   const { getOrderedGroups } = useGroupOrdering(groupOrderByProject);
@@ -1668,6 +1695,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         openSidebarMenuKey={openSidebarMenuKey}
         setOpenSidebarMenuKey={setOpenSidebarMenuKey}
         isInlineEditing={isInlineEditing}
+        onRefreshProject={handleRefreshProject}
       />
 
       {selectionModeEnabled && selectedIds.size > 0 ? (
