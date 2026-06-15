@@ -438,7 +438,7 @@ const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
 
 {desktopServicesTab === 'mcp' ? (
 <McpDropdownContent active={isDesktopServicesOpen && desktopServicesTab === 'mcp'} />
-        ) : null}
+) : null}
 
         {desktopServicesTab === 'plugin-status' ? (
           <div className="overflow-x-hidden">
