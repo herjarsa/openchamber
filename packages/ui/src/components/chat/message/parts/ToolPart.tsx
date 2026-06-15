@@ -1,6 +1,5 @@
 
 import React from 'react';
-import type { AnimationPlaybackControls } from 'motion';
 import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
 import { PatchDiff } from '@pierre/diffs/react';
 import { cn } from '@/lib/utils';
@@ -10,13 +9,12 @@ import type { ToolPart as ToolPartType, ToolState as ToolStateUnion } from '@ope
 import { toolDisplayStyles } from '@/lib/typography';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { useOptionalThemeSystem } from '@/contexts/useThemeSystem';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useDirectorySync, useSessionMessageRecords, useEnsureSessionMessages } from '@/sync/sync-context';
-import { useSessionActivity } from '@/hooks/useSessionActivity';
-import type { SessionActivityResult } from '@/hooks/useSessionActivity';
-import { useUIStore } from '@/stores/useUIStore';
 import { getSyncChildStores } from '@/sync/sync-refs';
+import { useUIStore } from '@/stores/useUIStore';
+import { useSessionActivity } from '@/hooks/useSessionActivity';
 import { opencodeClient } from '@/lib/opencode/client';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { sessionEvents } from '@/lib/sessionEvents';
@@ -47,13 +45,11 @@ import { getToolIcon } from './toolPresentation';
 import { useDurationTickerNow } from './useDurationTicker';
 import { resolveFallbackTaskSessionId } from './resolveFallbackTaskSessionId';
 import { readTaskTagSessionIdFromOutput } from './taskSessionIdParser';
+import { areRenderRelevantPartsEqual } from '../renderCompare';
 import { useI18n } from '@/lib/i18n';
 import { getDiffPatchEntries, getPatchText } from './toolDiffUtils';
-import { areRenderRelevantPartsEqual } from '../renderCompare';
-import { SubagentProgressIndicator } from './SubagentProgressIndicator';
-import { SubagentLiveOutput } from './SubagentLiveOutput';
 
-const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-4 sm:!leading-6 tracking-normal';
+const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
 const TOOL_ROW_TITLE_CLASS = cn('typography-meta font-medium', TOOL_ROW_TEXT_CLASS);
 const TOOL_ROW_DESCRIPTION_CLASS = cn('typography-meta', TOOL_ROW_TEXT_CLASS);
 
@@ -180,8 +176,6 @@ const VSCODE_TASK_TOOL_ACTIVE_FETCH_LIMIT = 30;
 const VSCODE_TASK_TOOL_IDLE_FETCH_LIMIT = 30;
 const TASK_TOOL_NO_CHANGE_BACKOFF_AFTER_POLLS = 3;
 const TASK_TOOL_SETTLE_GRACE_MS = 2500;
-const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"]);
-const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const TASK_TOOL_FALLBACK_RETRY_MS = 3000;
 const GIT_REFRESH_MUTATING_TOOLS = new Set([
     'bash',
@@ -206,29 +200,59 @@ const LiveDuration: React.FC<{ start: number; end?: number; active: boolean }> =
     return <>{formatDuration(start, end, now)}</>;
 };
 
-const EXPANDED_CONTENT_TRANSITION_MS = 0;
+const deferredToolBodyMounts: Array<{ active: boolean; fn: () => void }> = [];
+let deferredToolBodyFrame: number | undefined;
 
-const useAnimatedExpandedContent = (isExpanded: boolean) => {
-    const [shouldRender, setShouldRender] = React.useState(isExpanded);
+const flushDeferredToolBodyMounts = () => {
+    while (deferredToolBodyMounts.length > 0) {
+        const item = deferredToolBodyMounts.pop();
+        if (!item) {
+            break;
+        }
+        if (item.active) {
+            item.fn();
+            deferredToolBodyFrame = deferredToolBodyMounts.length > 0
+                ? window.requestAnimationFrame(flushDeferredToolBodyMounts)
+                : undefined;
+            return;
+        }
+    }
+
+    deferredToolBodyFrame = undefined;
+};
+
+const scheduleDeferredToolBodyMount = (fn: () => void) => {
+    if (typeof window === 'undefined') {
+        fn();
+        return () => undefined;
+    }
+
+    const item = { active: true, fn };
+    deferredToolBodyMounts.push(item);
+
+    if (deferredToolBodyFrame === undefined) {
+        deferredToolBodyFrame = window.requestAnimationFrame(() => {
+            deferredToolBodyFrame = window.requestAnimationFrame(flushDeferredToolBodyMounts);
+        });
+    }
+
+    return () => {
+        item.active = false;
+    };
+};
+
+const useDeferredExpandedContent = (isExpanded: boolean) => {
+    const [shouldRender, setShouldRender] = React.useState(false);
 
     React.useEffect(() => {
-        if (typeof window === 'undefined') {
-            setShouldRender(isExpanded);
-            return;
-        }
-
-        if (isExpanded) {
-            setShouldRender(true);
-            return;
-        }
-
-        const timer = window.setTimeout(() => {
+        if (!isExpanded) {
             setShouldRender(false);
-        }, EXPANDED_CONTENT_TRANSITION_MS);
+            return;
+        }
 
-        return () => {
-            window.clearTimeout(timer);
-        };
+        return scheduleDeferredToolBodyMount(() => {
+            setShouldRender(true);
+        });
     }, [isExpanded]);
 
     return shouldRender;
@@ -1206,18 +1230,17 @@ const TaskToolSummary: React.FC<{
     isMobile: boolean;
     output?: string;
     sessionId?: string;
-    currentDirectory: string;
     onShowPopup?: (content: ToolPopupContent) => void;
     input?: Record<string, unknown>;
     animateTailText?: boolean;
     isActive?: boolean;
-    messages?: MessageRecord[];
-    activity?: SessionActivityResult;
-}> = ({ entries, isExpanded, isMobile, output, sessionId, currentDirectory, onShowPopup, input, animateTailText = true, isActive = false, messages, activity }) => {
+}> = ({ entries, isExpanded, isMobile, output, sessionId, onShowPopup, input, animateTailText = true, isActive = false }) => {
     const { t } = useI18n();
+    const currentDirectory = useEffectiveDirectory();
     const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
+    const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
     const showToolFileIcons = useUIStore((state) => state.showToolFileIcons);
-
+    const runtime = React.useContext(RuntimeAPIContext);
     const displayEntries = entries;
 
     const trimmedOutput = typeof output === 'string'
@@ -1229,7 +1252,17 @@ const TaskToolSummary: React.FC<{
     const handleOpenSession = (event: React.MouseEvent) => {
         event.stopPropagation();
         if (sessionId && currentDirectory) {
-            setCurrentSession(sessionId, currentDirectory);
+            if (isMobile || runtime?.runtime.isVSCode) {
+                setCurrentSession(sessionId, currentDirectory);
+                return;
+            }
+
+            openContextPanelTab(currentDirectory, {
+                mode: 'chat',
+                dedupeKey: `session:${sessionId}`,
+                label: agentType.charAt(0).toUpperCase() + agentType.slice(1),
+                readOnly: true,
+            });
         }
     };
 
@@ -1319,10 +1352,6 @@ const TaskToolSummary: React.FC<{
                 </ToolScrollableSection>
             ) : null}
 
-            {sessionId && isActive ? (
-                <SubagentLiveOutput messages={messages} activity={activity} sessionId={sessionId} />
-) : null}
-
             {sessionId && (
                 <button
                     type="button"
@@ -1388,7 +1417,7 @@ const TOOL_DIFF_METRICS = {
     lineHeight: 24,
     diffHeaderHeight: 44,
     hunkSeparatorHeight: 24,
-    fileGap: 0,
+    spacing: 0,
 };
 
 const TOOL_COLLAPSED_CUSTOM_STYLE: React.CSSProperties = {
@@ -1573,6 +1602,7 @@ interface ToolExpandedContentProps {
     state: ToolStateUnion;
     syntaxTheme: { [key: string]: React.CSSProperties };
     currentDirectory: string;
+    isExpanded: boolean;
     onShowPopup?: (content: ToolPopupContent) => void;
 }
 
@@ -1581,6 +1611,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
     state,
     syntaxTheme,
     currentDirectory,
+    isExpanded,
     onShowPopup,
 }) => {
     const { t } = useI18n();
@@ -1873,7 +1904,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
                                     </blockquote>
                                 ),
                                 {
-                                    maxHeightClass: 'max-h-60',
+                                    maxHeightClass: isWriteLikeTool && writeLikeInputPatch && isExpanded ? 'max-h-[50vh]' : 'max-h-60',
                                     className: part.tool === 'bash' ? 'tool-input-surface p-0 rounded-none' : 'tool-input-surface',
                                 }
                             )}
@@ -1921,17 +1952,15 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
     onToggle,
     syntaxTheme,
     isMobile,
-    alwaysShowActions = isMobile,
     onContentChange,
     onShowPopup,
     animateTailText = true,
 }) => {
     const state = part.state;
     const showToolFileIcons = useUIStore((s) => s.showToolFileIcons);
-    const currentDirectory = useDirectoryStore((s) => s.currentDirectory);
+    const currentDirectory = useEffectiveDirectory() ?? '';
     const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
-    const subagentErrorFocusTarget = useSessionUIStore((s) => s.subagentErrorFocusTarget);
-    const setSubagentErrorFocusTarget = useSessionUIStore((s) => s.setSubagentErrorFocusTarget);
+
     const normalizedPartTool = normalizeToolName(part.tool);
     const isTaskTool = normalizedPartTool === 'task';
 
@@ -1980,26 +2009,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
     const onContentChangeRef = React.useRef(onContentChange);
     onContentChangeRef.current = onContentChange;
     const expandedContentRef = React.useRef<HTMLDivElement>(null);
-    const expandedContentAnimationRef = React.useRef<AnimationPlaybackControls | null>(null);
-    const expandedContentMountedRef = React.useRef(false);
-    const rootRef = React.useRef<HTMLDivElement>(null);
-    const [isErrorFocused, setIsErrorFocused] = React.useState(false);
 
-    React.useEffect(() => {
-        if (!subagentErrorFocusTarget) return;
-        if (subagentErrorFocusTarget.sessionId !== currentSessionId) return;
-        if (subagentErrorFocusTarget.messageId !== part.messageID) return;
-        if (subagentErrorFocusTarget.partId !== part.id) return;
-
-        rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setIsErrorFocused(true);
-        const timer = setTimeout(() => {
-            setIsErrorFocused(false);
-            setSubagentErrorFocusTarget(null);
-        }, 3000);
-
-        return () => clearTimeout(timer);
-    }, [subagentErrorFocusTarget, currentSessionId, part.messageID, part.id, setSubagentErrorFocusTarget]);
     React.useLayoutEffect(() => {
         if (isTaskTool) {
             return;
@@ -2010,9 +2020,6 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
             return;
         }
 
-        expandedContentMountedRef.current = true;
-        expandedContentAnimationRef.current?.stop();
-        expandedContentAnimationRef.current = null;
         element.style.height = isExpanded ? 'auto' : '0px';
         element.style.overflow = isExpanded ? 'visible' : 'hidden';
 
@@ -2020,13 +2027,6 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
             onContentChangeRef.current?.('structural');
         }
     }, [isExpanded, isTaskTool, shouldNotifyStructuralChange]);
-
-    React.useEffect(() => {
-        return () => {
-            expandedContentAnimationRef.current?.stop();
-            expandedContentAnimationRef.current = null;
-        };
-    }, []);
 
     const stateWithData = state as ToolStateWithMetadata;
     const metadata = stateWithData.metadata;
@@ -2209,43 +2209,6 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
         }
 
         return false;
-    }, [childSessionMessages, isTaskTool, taskSessionId]);
-
-    const childSessionTokenSummary = React.useMemo(() => {
-        if (!isTaskTool || !taskSessionId || !Array.isArray(childSessionMessages) || childSessionMessages.length === 0) {
-            return null;
-        }
-
-        let totalTokens = 0;
-        let totalCost = 0;
-        let hasData = false;
-
-        for (let i = childSessionMessages.length - 1; i >= 0; i -= 1) {
-            const message = childSessionMessages[i] as { info?: { role?: unknown; tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }; cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } } } };
-            const messageInfo = message.info;
-            if (messageInfo?.role !== 'assistant') continue;
-
-            if (!hasData && messageInfo.tokens) {
-                const tokens = messageInfo.tokens;
-                totalTokens =
-                    (tokens.input ?? 0) +
-                    (tokens.output ?? 0) +
-                    (tokens.reasoning ?? 0) +
-                    (tokens.cache?.read ?? 0) +
-                    (tokens.cache?.write ?? 0);
-                const cost = messageInfo.cost;
-                if (cost) {
-                    totalCost = (cost.input ?? 0) + (cost.output ?? 0) + (cost.cache?.read ?? 0) + (cost.cache?.write ?? 0);
-                }
-                hasData = true;
-            }
-
-            if (hasData) break;
-        }
-
-        if (!hasData || totalTokens === 0) return null;
-
-        return { tokens: totalTokens, cost: totalCost };
     }, [childSessionMessages, isTaskTool, taskSessionId]);
 
     const childSessionActivity = useSessionActivity(taskSessionId, currentDirectory);
@@ -2604,57 +2567,6 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
         taskSessionId,
     ]);
 
-    // When child session polling stops (child completed + settle grace elapsed),
-    // resync the parent session's messages/parts to ensure the task tool part
-    // reflects the final state. This covers the case where SSE
-    // message.part.updated for the parent's task tool part was coalesced,
-    // delayed, or lost after the subagent completed.
-    //
-    // Only updates the specific message that contains this task tool part,
-    // avoiding overwriting in-flight SSE state for other messages.
-    React.useEffect(() => {
-        if (!taskChildPollingStopped || !isTaskTool || !currentSessionId || !currentDirectory || !part.messageID) {
-            return;
-        }
-
-        let cancelled = false;
-        const targetMessageID = part.messageID;
-        const childStores = getSyncChildStores();
-
-        void (async () => {
-            try {
-                const scopedClient = opencodeClient.getScopedSdkClient(currentDirectory);
-                const response = await scopedClient.session.messages({
-                    sessionID: currentSessionId,
-                    limit: TASK_TOOL_ACTIVE_FETCH_LIMIT,
-                });
-                const records = response.data ?? [];
-                if (cancelled || !Array.isArray(records) || records.length === 0) {
-                    return;
-                }
-
-                // Find only the target message record that contains our task tool part
-                const targetRecord = records.find((record) => record?.info?.id === targetMessageID);
-                if (!targetRecord || !targetRecord.parts) return;
-
-                const fetchedParts = targetRecord.parts
-.filter((p) => !!p?.id && typeof p.type === 'string' && !SKIP_PARTS.has(p.type))
-.sort((a, b) => cmp(a.id, b.id))
-
-                childStores.update(currentDirectory, (prev) => ({
-                    ...prev,
-                    part: { ...prev.part, [targetMessageID]: fetchedParts },
-                }));
-            } catch {
-                // Ignore transient parent session fetch errors.
-            }
-        })();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [taskChildPollingStopped, isTaskTool, currentSessionId, currentDirectory, part.messageID]);
-
     const taskSummaryLenRef = React.useRef<number>(taskSummaryEntries.length);
     React.useEffect(() => {
         if (!isTaskTool) {
@@ -2766,16 +2678,17 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
         handleMainClick(event);
     };
 
-    const iconStyle = isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
-    const titleStyle = isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
-    const shouldRenderExpandedContent = useAnimatedExpandedContent(isExpanded);
+    const iconStyle = !isTaskTool && isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
+    const titleStyle = !isTaskTool && isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
+    const shouldRenderTaskSummary = useDeferredExpandedContent(isTaskTool && (taskSummaryEntries.length > 0 || isActive || shouldTreatAsFinalized || !!taskSessionId));
+    const shouldRenderExpandedContent = useDeferredExpandedContent(!isTaskTool && isExpanded);
 
     if (!shouldTreatAsFinalized && !isActive && !isTaskTool) {
         return null;
     }
 
     return (
-        <div ref={rootRef} className={cn(isErrorFocused && 'ring-2 ring-status-error rounded-xl animate-pulse')}>
+        <div>
             {}
             <div
                 className={cn(
@@ -2798,7 +2711,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                             className={cn(
                                 'absolute inset-0 transition-opacity',
                                 isExpanded && 'opacity-0',
-                                !isExpanded && (alwaysShowActions ? 'opacity-0' : 'group-hover/tool:opacity-0')
+                                !isExpanded && 'group-hover/tool:opacity-0'
                             )}
                             style={iconStyle}
                         >
@@ -2809,7 +2722,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                             className={cn(
                                 'absolute inset-0 transition-opacity flex items-center justify-center',
                                 isExpanded && 'opacity-100',
-                                !isExpanded && (alwaysShowActions ? 'opacity-100' : 'opacity-0 group-hover/tool:opacity-100')
+                                !isExpanded && 'opacity-0 group-hover/tool:opacity-100'
                             )}
                         >
                             {isExpanded ? <Icon name="arrow-down-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-right-s" className="h-3.5 w-3.5" />}
@@ -2895,35 +2808,23 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                                     <span style={{ color: 'var(--status-success)' }}>+{writeLineCount}</span>
                                 </span>
                             )}
-                            {isTaskTool && taskSessionId ? (
-                                <SubagentProgressIndicator taskSessionId={taskSessionId} currentDirectory={currentDirectory} />
-                            ) : null}
-                            {isTaskTool && childSessionTokenSummary ? (
-                                <span className="flex-shrink-0 typography-meta text-muted-foreground/70" title={`Subagent tokens: ${childSessionTokenSummary.tokens}`}>
-                                    {childSessionTokenSummary.tokens.toLocaleString()} tks
-                                    {childSessionTokenSummary.cost > 0 ? ` · $${childSessionTokenSummary.cost.toFixed(4)}` : null}
-                                </span>
-                            ) : null}
                         </div>
                     </div>
                 )}
             </div>
 
             {}
-            {isTaskTool && (taskSummaryEntries.length > 0 || isActive || shouldTreatAsFinalized || taskSessionId) ? (
+            {shouldRenderTaskSummary ? (
                 <TaskToolSummary
                     entries={taskSummaryEntries}
                     isExpanded={isExpanded}
                     isMobile={isMobile}
                     output={taskOutputString}
                     sessionId={taskSessionId}
-                    currentDirectory={currentDirectory}
                     onShowPopup={onShowPopup}
                     input={input}
                     animateTailText={animateTailText}
                     isActive={isActive}
-                    messages={childSessionMessages}
-                    activity={childSessionActivity}
                 />
             ) : null}
 
@@ -2940,10 +2841,6 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                     {shouldRenderExpandedContent ? (
                         <div
                             className="relative ml-2 pl-3"
-                            style={{
-                                opacity: isExpanded ? 1 : 0,
-                                transform: isExpanded ? 'translateY(0)' : 'translateY(-4px)',
-                            }}
                         >
                             <span
                                 aria-hidden="true"
@@ -2955,6 +2852,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                                 state={state}
                                 syntaxTheme={syntaxTheme}
                                 currentDirectory={currentDirectory}
+                                isExpanded={isExpanded}
                                 onShowPopup={onShowPopup}
                             />
                         </div>
