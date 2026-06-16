@@ -34,6 +34,7 @@ import {
 
 // New sync system imports
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useStreamingStore } from '@/sync/streaming';
 import {
     useSessionMessageCount,
@@ -787,7 +788,27 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
     React.useEffect(() => {
         if (!currentSessionId) return;
         if (hasRenderableSessionSnapshot) return;
-        if (effectiveSessionDirectory !== syncDirectory) return;
+        if (effectiveSessionDirectory !== syncDirectory) {
+            // Directory hasn't reconciled yet after the atomic store update.
+            // Retry on a short interval (capped) to avoid silently skipping
+            // the message fetch — otherwise the session can stay in an
+            // unrenderable state forever.
+            const start = Date.now();
+            const interval = window.setInterval(() => {
+                const dirMatches = effectiveSessionDirectory === useDirectoryStore.getState().currentDirectory;
+                const nowRenderable = hasRenderableSessionSnapshot;
+                if (nowRenderable || dirMatches) {
+                    window.clearInterval(interval);
+                    if (!nowRenderable) {
+                        void ensureSessionRenderable(currentSessionId);
+                    }
+                } else if (Date.now() - start > 2000) {
+                    // Give up after 2s — the session is unlikely to recover.
+                    window.clearInterval(interval);
+                }
+            }, 80);
+            return () => window.clearInterval(interval);
+        }
         void ensureSessionRenderable(currentSessionId);
     }, [currentSessionId, effectiveSessionDirectory, ensureSessionRenderable, hasRenderableSessionSnapshot, syncDirectory]);
 
@@ -938,7 +959,6 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
 		<div className="relative flex flex-col h-full bg-background">
 			{returnToParentButton}
 			<ChatViewport
-				key={currentSessionId}
 				currentSessionId={currentSessionId}
                 isDesktopExpandedInput={isDesktopExpandedInput}
                 isMobile={isMobile}
