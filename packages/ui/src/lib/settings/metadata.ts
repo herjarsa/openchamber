@@ -136,7 +136,6 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'opencode',
     kind: 'split',
     keywords: ['plugin', 'plugins', 'extensions', 'addons', 'npm', 'opencode-wakatime'],
-    isAvailable: () => false,
   },
   {
     slug: 'plugin-status',
