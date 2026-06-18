@@ -21,8 +21,9 @@ import { copyTextToClipboard } from '@/lib/clipboard';
 import { openExternalUrl } from '@/lib/url';
 import type { ModelMetadata } from '@/types';
 import { getCurrentIntlLocale, useI18n } from '@/lib/i18n';
-import { runtimeFetch } from '@/lib/runtime-fetch';
+import { fetchProviderSource } from '@/lib/api/providersApi';
 import { opencodeClient } from '@/lib/opencode/client';
+import { shouldLoadAvailableProviders } from './providerAvailability';
 
 const formatCompactNumber = (value: number) => new Intl.NumberFormat(getCurrentIntlLocale(), {
   notation: 'compact',
@@ -169,6 +170,7 @@ export const ProvidersPage: React.FC = () => {
   const [providerDropdownOpen, setProviderDropdownOpen] = React.useState(false);
   const [providerSources, setProviderSources] = React.useState<Record<string, ProviderSources>>({});
   const [showAuthPanel, setShowAuthPanel] = React.useState(false);
+  const isAddMode = selectedProviderId === ADD_PROVIDER_ID;
 
   React.useEffect(() => {
     if (!selectedProviderId && providers.length > 0) {
@@ -177,6 +179,10 @@ export const ProvidersPage: React.FC = () => {
   }, [providers, selectedProviderId, setSelectedProvider]);
 
   React.useEffect(() => {
+    if (!isAddMode) {
+      return;
+    }
+
     let isMounted = true;
 
     const loadAuthMethods = async () => {
@@ -204,9 +210,13 @@ export const ProvidersPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [t]);
+  }, [isAddMode, t]);
 
   React.useEffect(() => {
+    if (!shouldLoadAvailableProviders(isAddMode)) {
+      return;
+    }
+
     let isMounted = true;
 
     const loadAvailableProviders = async () => {
@@ -235,7 +245,7 @@ export const ProvidersPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [t]);
+  }, [isAddMode, t]);
 
   const connectedProviderIds = React.useMemo(
     () => new Set(providers.map((provider) => provider.id)),
@@ -282,19 +292,7 @@ export const ProvidersPage: React.FC = () => {
 
     const loadSources = async () => {
       try {
-        // OpenChamber-only metadata endpoint: the SDK exposes provider data but
-        // not local auth/source-file provenance used by this settings UI.
-        const response = await runtimeFetch(`/api/provider/${encodeURIComponent(selectedProviderId)}/source`, {
-          method: 'GET',
-          headers: { Accept: 'application/json' },
-        });
-
-        const payload = await response.json().catch(() => null);
-        if (!response.ok) {
-          throw new Error(payload?.error || t('settings.providers.page.toast.providerSourcesLoadFailed'));
-        }
-
-        const sources = (payload?.sources ?? payload?.data?.sources) as ProviderSources | undefined;
+        const sources = await fetchProviderSource(selectedProviderId);
         if (!cancelled && sources) {
           setProviderSources((prev) => ({
             ...prev,
@@ -481,8 +479,6 @@ export const ProvidersPage: React.FC = () => {
       setAuthBusyKey(null);
     }
   };
-
-  const isAddMode = selectedProviderId === ADD_PROVIDER_ID;
 
   if (!isAddMode && providers.length === 0) {
     return (

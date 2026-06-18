@@ -17,6 +17,11 @@ import { createCloudflareTunnelProvider } from './lib/tunnels/providers/cloudfla
 import { createNgrokTunnelProvider } from './lib/tunnels/providers/ngrok.js';
 import { createRequestSecurityRuntime } from './lib/security/request-security.js';
 import {
+  getUnauthenticatedLanErrorMessage,
+  isNetworkExposedBindHost,
+  isUnsafeUnauthenticatedLanAllowed,
+} from './lib/security/bind-host.js';
+import {
   TUNNEL_MODE_MANAGED_LOCAL,
   TUNNEL_MODE_MANAGED_REMOTE,
   TUNNEL_MODE_QUICK,
@@ -70,6 +75,7 @@ import { createServerStartupRuntime } from './lib/opencode/server-startup-runtim
 import { createTunnelWiringRuntime } from './lib/opencode/tunnel-wiring-runtime.js';
 import { createStartupPipelineRuntime } from './lib/opencode/startup-pipeline-runtime.js';
 import { runCliEntryIfMain } from './lib/opencode/cli-entry-runtime.js';
+import { autoUpdatePlugins } from './lib/opencode/plugins.js';
 import { registerNotificationRoutes } from './lib/notifications/routes.js';
 import { createNotificationEmitterRuntime } from './lib/notifications/emitter-runtime.js';
 import { createNotificationTriggerRuntime } from './lib/notifications/runtime.js';
@@ -1032,6 +1038,20 @@ const gracefulShutdown = (...args) => gracefulShutdownRuntime.gracefulShutdown(.
 async function main(options = {}) {
   const port = Number.isFinite(options.port) && options.port >= 0 ? Math.trunc(options.port) : DEFAULT_PORT;
   const host = typeof options.host === 'string' && options.host.length > 0 ? options.host : undefined;
+  const effectiveBindHost = host
+    || (typeof process.env.OPENCHAMBER_HOST === 'string' && process.env.OPENCHAMBER_HOST.trim().length > 0
+      ? process.env.OPENCHAMBER_HOST.trim()
+      : '127.0.0.1');
+  const uiPassword = typeof options.uiPassword === 'string'
+    ? options.uiPassword
+    : (typeof process.env.OPENCHAMBER_UI_PASSWORD === 'string' ? process.env.OPENCHAMBER_UI_PASSWORD : null);
+  if (
+    isNetworkExposedBindHost(effectiveBindHost)
+    && !(typeof uiPassword === 'string' && uiPassword.trim().length > 0)
+    && !isUnsafeUnauthenticatedLanAllowed(process.env)
+  ) {
+    throw new Error(getUnauthenticatedLanErrorMessage(effectiveBindHost));
+  }
   const tryCfTunnel = options.tryCfTunnel === true;
   const apiOnly = options.apiOnly === true || isEnvFlagEnabled(process.env.OPENCHAMBER_API_ONLY);
   const shouldUseCanonicalTunnelConfig = typeof options.tunnelMode === 'string'
@@ -1077,6 +1097,17 @@ async function main(options = {}) {
   const serverStartedAt = new Date().toISOString();
   const packagedClientOrigins = new Set(['openchamber-ui://app']);
   app.set('trust proxy', true);
+  // Keep self-hosted instances out of search engines. The app shell is served
+  // publicly (it loads before prompting for the UI password), so without this
+  // even a password-protected instance gets crawled and indexed. Applies to
+  // every response; the robots.txt route makes the intent explicit for crawlers.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    next();
+  });
+  app.get('/robots.txt', (_req, res) => {
+    res.type('text/plain').send('User-agent: *\nDisallow: /\n');
+  });
   app.use((req, res, next) => {
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
     if (packagedClientOrigins.has(origin)) {
@@ -1103,7 +1134,6 @@ async function main(options = {}) {
   expressApp = app;
   server = http.createServer(app);
 
-  const uiPassword = typeof options.uiPassword === 'string' ? options.uiPassword : null;
   const bootstrapResult = bootstrapRuntime.setupBaseRoutes(app, {
     process,
     openchamberVersion: OPENCHAMBER_VERSION,
@@ -1250,6 +1280,7 @@ async function main(options = {}) {
     setupProxy,
     scheduleOpenCodeApiDetection,
     bootstrapOpenCodeAtStartup,
+    autoUpdatePlugins,
     triggerHealthCheck,
     staticRoutesRuntime,
     process,
@@ -1283,6 +1314,16 @@ async function main(options = {}) {
   } catch (error) {
     console.warn('[ScheduledTasks] Failed to start runtime:', error?.message || error);
   }
+
+  // Wire process signals to graceful shutdown so the auto-started OpenCode
+  // child process is killed when the server exits (Ctrl+C, SIGTERM, etc.).
+  // The existing attachProcessHandlers in server-startup-runtime.js covers
+  // SIGTERM/SIGINT/SIGQUIT when attachSignals is enabled (CLI mode), but not
+  // SIGHUP. Register SIGHUP here unconditionally since no other handler covers it.
+  // Use exitProcess:true so the process exits even in programmatic mode.
+  process.on('SIGHUP', () => {
+    gracefulShutdown({ exitProcess: true });
+  });
 
   return {
     expressApp: app,

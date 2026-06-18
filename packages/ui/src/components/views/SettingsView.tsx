@@ -18,8 +18,6 @@ import { CommandsSidebar } from '@/components/sections/commands/CommandsSidebar'
 import { CommandsPage } from '@/components/sections/commands/CommandsPage';
 import { McpSidebar } from '@/components/sections/mcp/McpSidebar';
 import { McpPage } from '@/components/sections/mcp/McpPage';
-import { PluginsSidebar, PluginsPage } from '@/components/sections/plugins';
-import { usePluginsStore } from '@/stores/usePluginsStore';
 import { SkillsSidebar } from '@/components/sections/skills/SkillsSidebar';
 import { SkillsPage } from '@/components/sections/skills/SkillsPage';
 import { ProjectsSidebar } from '@/components/sections/projects/ProjectsSidebar';
@@ -96,7 +94,6 @@ const pageOrder: SettingsPageSlug[] = [
   'behavior',
   'commands',
   'mcp',
-  'plugins',
   'providers',
   'usage',
   'skills.installed',
@@ -109,10 +106,10 @@ const pageOrder: SettingsPageSlug[] = [
 const SNIPPETS_SETTINGS_ICON = { icon: 'chat-thread' } as const;
 const ADD_PROVIDER_SETTINGS_ID = '__add_provider__';
 
-function buildRuntimeContext(isDesktop: boolean): SettingsRuntimeContext {
+function buildRuntimeContext(isDesktop: boolean, isMobile: boolean): SettingsRuntimeContext {
   const isVSCode = isVSCodeRuntime();
   const isWeb = !isDesktop && isWebRuntime();
-  return { isVSCode, isWeb, isDesktop };
+  return { isVSCode, isWeb, isDesktop, isMobile };
 }
 
 function isPageAvailable(page: SettingsPageMeta, ctx: SettingsRuntimeContext): boolean {
@@ -196,8 +193,6 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
       return 'slash-commands-2';
     case 'mcp':
       return null;
-    case 'plugins':
-      return 'code-box';
 
     case 'skills.installed':
       return 'book-open';
@@ -216,6 +211,9 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
     case 'about':
       return 'information';
     case 'home':
+      return null;
+    case 'plugin-status':
+    case 'plugins':
       return null;
     default:
       return 'robot-2';
@@ -333,7 +331,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
 
   // keep platform check available for future window chrome tweaks
 
-  const runtimeCtx = React.useMemo(() => buildRuntimeContext(isDesktopApp), [isDesktopApp]);
+  const runtimeCtx = React.useMemo(() => buildRuntimeContext(isDesktopApp, isMobile), [isDesktopApp, isMobile]);
 
   const visiblePages = React.useMemo(() => {
     const allowedPages = visiblePageSlugs ? new Set<SettingsPageSlug>(visiblePageSlugs) : null;
@@ -434,10 +432,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
       void useMcpConfigStore.getState().loadMcpConfigs();
       return;
     }
-    if (settingsSlug === 'plugins') {
-      void usePluginsStore.getState().loadPlugins();
-      return;
-    }
     if (settingsSlug === 'skills.installed' || settingsSlug === 'skills.catalog') {
       void useSkillsStore.getState().loadSkills();
       void useSkillsCatalogStore.getState().loadCatalog();
@@ -495,8 +489,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.commands.title');
       case 'mcp':
         return t('settings.page.mcp.title');
-      case 'plugins':
-        return t('settings.page.plugins.title');
       case 'skills.installed':
         return t('settings.page.skills.title');
       case 'skills.catalog':
@@ -532,12 +524,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
   const settingsSearchResults = React.useMemo(() => {
     return buildSettingsSearchResults({
       query: settingsSearchQuery,
-      runtimeCtx: { ...runtimeCtx, isMobile, isDesktopLocalOrigin },
+      runtimeCtx: { ...runtimeCtx, isDesktopLocalOrigin },
       visiblePageSlugs,
       t,
       getPageTitle,
     });
-  }, [getPageTitle, isDesktopLocalOrigin, isMobile, runtimeCtx, settingsSearchQuery, t, visiblePageSlugs]);
+  }, [getPageTitle, isDesktopLocalOrigin, runtimeCtx, settingsSearchQuery, t, visiblePageSlugs]);
 
   const prepareSettingsSearchTarget = React.useCallback((result: SettingsSearchResult): string => {
     if (result.id.startsWith('agents.')) {
@@ -599,9 +591,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
       useConfigStore.getState().setSelectedProvider(ADD_PROVIDER_SETTINGS_ID);
     }
 
-    if (result.id === 'plugins.create') {
-      return 'plugins.spec';
-    }
 
     return result.id;
   }, []);
@@ -648,11 +637,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
     openPage(result.page);
     if (isMobile) {
       setMobileStage('page-content');
-    }
-    if (result.id === 'plugins.create' && typeof window !== 'undefined') {
-      window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('openchamber:settings-open-plugin-add'));
-      }, 50);
     }
   }, [isMobile, openPage, prepareSettingsSearchTarget]);
 
@@ -748,8 +732,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <CommandsSidebar onItemSelect={opts.onItemSelect} />;
       case 'mcp':
         return <McpSidebar onItemSelect={opts.onItemSelect} />;
-      case 'plugins':
-        return <PluginsSidebar onItemSelect={opts.onItemSelect} />;
       case 'skills.installed':
         return <SkillsSidebar onItemSelect={opts.onItemSelect} />;
       case 'providers':
@@ -786,8 +768,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <CommandsPage />;
       case 'mcp':
         return <McpPage />;
-      case 'plugins':
-        return <PluginsPage />;
       case 'skills.installed':
         return <SkillsPage view="installed" />;
       case 'skills.catalog':
@@ -817,7 +797,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
       default:
         return <SettingsHome onOpen={openPage} />;
     }
-  }, [openChamberSectionBySlug, openPage, renderUnavailable, runtimeCtx]);
+  }, [openChamberSectionBySlug, openPage, renderUnavailable, runtimeCtx, onClose]);
 
   // Mobile: if opened via deep-link / palette to a non-home page, jump into it once.
   React.useEffect(() => {

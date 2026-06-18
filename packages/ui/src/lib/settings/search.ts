@@ -116,6 +116,12 @@ export const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['input', 'home bar', 'offset'],
   },
   {
+    id: 'appearance.expanded-editor-toolbar',
+    page: 'appearance',
+    titleKey: 'settings.openchamber.visual.field.expandedEditorToolbar',
+    keywords: ['editor', 'toolbar', 'tabs', 'docked', 'files'],
+  },
+  {
     id: 'appearance.file-editor-keymap',
     page: 'appearance',
     titleKey: 'settings.openchamber.visual.field.fileEditorKeymap',
@@ -190,6 +196,13 @@ export const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'chat',
     titleKey: 'settings.openchamber.visual.field.showTurnChangedFiles',
     keywords: ['changed files', 'turns'],
+  },
+  {
+    id: 'sidebar.subagent-sessions',
+    page: 'chat',
+    titleKey: 'settings.openchamber.visual.field.showSubagentSessionsInSidebar',
+    descriptionKey: 'settings.openchamber.visual.field.showSubagentSessionsInSidebarDescription',
+    keywords: ['subagent', 'sidebar', 'sessions'],
   },
   {
     id: 'chat.dotfiles',
@@ -507,30 +520,6 @@ export const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'mcp',
     titleKey: 'settings.mcp.page.advanced.title',
     keywords: ['oauth', 'headers', 'timeout'],
-  },
-  {
-    id: 'plugins.create',
-    page: 'plugins',
-    titleKey: 'settings.plugins.sidebar.actions.addTitle',
-    keywords: ['add', 'plugin', 'npm', 'path', 'file'],
-  },
-  {
-    id: 'plugins.spec',
-    page: 'plugins',
-    titleKey: 'settings.plugins.page.field.spec',
-    keywords: ['npm', 'package', 'path'],
-  },
-  {
-    id: 'plugins.options',
-    page: 'plugins',
-    titleKey: 'settings.plugins.page.field.options',
-    keywords: ['json', 'configuration'],
-  },
-  {
-    id: 'plugins.content',
-    page: 'plugins',
-    titleKey: 'settings.plugins.page.field.content',
-    keywords: ['file', 'code'],
   },
   {
     id: 'snippets.create',

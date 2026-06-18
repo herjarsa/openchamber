@@ -11,6 +11,7 @@ export type SettingsPageSlug =
   | 'commands'
   | 'mcp'
   | 'plugins'
+  | 'plugin-status'
   | 'skills.installed'
   | 'skills.catalog'
   | 'git'
@@ -39,6 +40,7 @@ export interface SettingsRuntimeContext {
   isVSCode: boolean;
   isWeb: boolean;
   isDesktop: boolean;
+  isMobile: boolean;
 }
 
 export interface SettingsPageMeta {
@@ -134,6 +136,15 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'opencode',
     kind: 'split',
     keywords: ['plugin', 'plugins', 'extensions', 'addons', 'npm', 'opencode-wakatime'],
+    isAvailable: () => false,
+  },
+  {
+    slug: 'plugin-status',
+    title: 'Plugin Status',
+    group: 'opencode',
+    kind: 'single',
+    keywords: ['plugin', 'status', 'health', 'mcp'],
+    isAvailable: () => false,
   },
   {
     slug: 'skills.installed',
@@ -205,7 +216,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
   { slug: 'notifications', title: 'Notifications', group: 'general', kind: 'single', keywords: ['alerts', 'native', 'summary', 'summarization'], },
   { slug: 'voice', title: 'Voice', group: 'advanced', kind: 'single', keywords: ['tts', 'speech', 'voice'], isAvailable: (ctx) => !ctx.isVSCode },
   { slug: 'tunnel', title: 'Remote Tunnel', group: 'advanced', kind: 'single', keywords: ['tunnel', 'cloudflare', 'qr', 'remote', 'mobile', 'share'], isAvailable: (ctx) => !ctx.isVSCode },
-  { slug: 'about', title: 'About', group: 'advanced', kind: 'single', keywords: ['about', 'version', 'updates', 'release', 'changelog'], },
+  { slug: 'about', title: 'About', group: 'advanced', kind: 'single', keywords: ['about', 'version', 'updates', 'release', 'changelog'], isAvailable: (ctx) => ctx.isMobile },
 ] as const;
 
 export const LEGACY_SIDEBAR_SECTION_TO_SETTINGS_SLUG: Record<SidebarSection, SettingsPageSlug> = {

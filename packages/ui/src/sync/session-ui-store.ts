@@ -24,6 +24,7 @@ import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from "@/stores/
 import { useDirectoryStore } from "@/stores/useDirectoryStore"
 import { useSessionFoldersStore } from "@/stores/useSessionFoldersStore"
 import { useCommandsStore } from "@/stores/useCommandsStore"
+import { useSkillsStore } from "@/stores/useSkillsStore"
 import { getSafeStorage } from "@/stores/utils/safeStorage"
 import { markPendingUserSendAnimation } from "@/lib/userSendAnimation"
 import { flattenAssistantTextParts } from "@/lib/messages/messageText"
@@ -38,7 +39,7 @@ import {
   getDirectoryState,
 } from "./sync-refs"
 import { markSessionViewed } from "./notification-store"
-import { setActiveSession } from "./sync-context"
+import { setActiveSession } from "./active-session"
 import {
   createSession as createSessionAction,
   deleteSession as deleteSessionAction,
@@ -51,6 +52,7 @@ import {
   revertToMessage as revertToMessageAction,
   unrevertSession as unrevertSessionAction,
   forkFromMessage as forkFromMessageAction,
+  fetchMessagesForSession,
 } from "./session-actions"
 import { useInputStore, type SyntheticContextPart } from "./input-store"
 import { useSelectionStore } from "./selection-store"
@@ -100,8 +102,14 @@ export function routeMessage(params: {
     const syncCommands = dirState?.command ?? []
     const storeCommands = useCommandsStore.getState().commands
 
+    // OpenCode registers every skill as a command (source: "skill"), but the
+    // commands store filters skills out and the synced command list is only
+    // hydrated at bootstrap. Consult the live skills store so a skill selected
+    // from the slash menu is invoked via session.command (injecting its
+    // content) instead of being sent as a literal "/name" message (#1605).
     const isCommand = syncCommands.find((c) => c.name === cmdName)
       || storeCommands.find((c) => c.name === cmdName)
+      || useSkillsStore.getState().skills.some((s) => s.name === cmdName)
 
     if (isCommand) {
       return optimisticSend({
@@ -230,6 +238,10 @@ export type SessionUIState = {
   // Non-Git mode: dismissed signature hash per session, hides bar until new turn arrives
   pendingChangesBarDismissed: Map<string, string>
   dismissPendingChangesBar: (sessionId: string, signature: string | null) => void
+
+  // Subagent error focus target — drives scroll+highlight to the failed task row
+  subagentErrorFocusTarget: { sessionId: string; messageId: string; partId: string } | null
+  setSubagentErrorFocusTarget: (target: { sessionId: string; messageId: string; partId: string } | null) => void
 
   // Actions — UI state management
   setCurrentSession: (id: string | null, directoryHint?: string | null) => void
@@ -404,6 +416,47 @@ const writeRuntimeSessionMemory = (key: string, patch: Partial<RuntimeSessionMem
 // Store
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Persisted worktree map (stale-while-revalidate)
+//
+// Worktree discovery is async (git), so the worktree→project map isn't ready at
+// startup. Persist it so (a) the sidebar worktree list paints instantly, and
+// (b) useConfigStore.resolveConfigDirectory can map a worktree to its project on
+// the FIRST launch — yielding a single project-scoped config load instead of a
+// worktree+project double-load. Discovery refreshes it in the background.
+// ---------------------------------------------------------------------------
+const WORKTREE_MAP_STORAGE_KEY = 'oc.worktreeMap'
+
+const loadPersistedWorktreeMap = (): Map<string, WorktreeMetadata[]> => {
+  try {
+    const raw = getSafeStorage().getItem(WORKTREE_MAP_STORAGE_KEY)
+    if (!raw) return new Map()
+    const entries = JSON.parse(raw) as Array<[string, WorktreeMetadata[]]>
+    if (!Array.isArray(entries)) return new Map()
+    return new Map(
+      entries.filter((entry) => Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1])),
+    )
+  } catch {
+    return new Map()
+  }
+}
+
+const persistWorktreeMap = (map: Map<string, WorktreeMetadata[]>): void => {
+  try {
+    getSafeStorage().setItem(WORKTREE_MAP_STORAGE_KEY, JSON.stringify([...map.entries()]))
+  } catch {
+    // quota / serialization error — ignore; discovery still refreshes at runtime
+  }
+}
+
+const flattenWorktreeMap = (map: Map<string, WorktreeMetadata[]>): WorktreeMetadata[] => {
+  const out: WorktreeMetadata[] = []
+  for (const list of map.values()) out.push(...list)
+  return out
+}
+
+const PERSISTED_WORKTREE_MAP = loadPersistedWorktreeMap()
+
 export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   currentSessionId: null,
   currentSessionDirectory: null,
@@ -412,8 +465,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   abortPromptExpiresAt: null,
   error: null,
   worktreeMetadata: new Map(),
-  availableWorktrees: [],
-  availableWorktreesByProject: new Map(),
+  availableWorktrees: flattenWorktreeMap(PERSISTED_WORKTREE_MAP),
+  availableWorktreesByProject: PERSISTED_WORKTREE_MAP,
   webUICreatedSessions: new Set(),
   sessionAbortFlags: new Map(),
   abortControllers: new Map(),
@@ -421,6 +474,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   lastLoadedDirectory: null,
   sessionPlanAvailable: new Map(),
   pendingChangesBarDismissed: new Map(),
+  subagentErrorFocusTarget: null,
+  setSubagentErrorFocusTarget: (target) => set({ subagentErrorFocusTarget: target }),
 
   // ---------------------------------------------------------------------------
   // setCurrentSession
@@ -455,6 +510,13 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     // same child store that send/SSE events will update during startup races.
     set({ currentSessionId: id, currentSessionDirectory: id ? resolvedDir ?? null : null })
     writeRuntimeSessionMemory(key, { sessionId: id, directory: resolvedDir ?? null })
+
+    // Kick off the message fetch on the same tick, before React commits the
+    // state change and fires ChatContainer.useEffect. The fetch is
+    // fire-and-forget — any transient failure gets retried by the reactive path.
+    if (id) {
+      void fetchMessagesForSession(id, resolvedDir)
+    }
 
     try {
       if (resolvedDir && directoryState.currentDirectory !== resolvedDir) {
@@ -617,7 +679,20 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       useInputStore.getState().setPendingInputText(options.initialPrompt)
     }
 
-    void activateConfigForDirectory(directory)
+    // Config (providers/agents/default model+agent) lives at the PROJECT level. When the user
+    // came from a worktree session, `directory` is the worktree path, whose provider list does
+    // not include project/global-scoped providers (e.g. the default agent's non-opencode model)
+    // — resolving defaults against it would wrongly fall back to opencode/big-pickle. Activate
+    // the project's config instead so the default cascade matches app startup, then re-apply it
+    // (a fresh draft must start from defaults, not inherit the previous session's selection).
+    const configDirectory = normalizePath(selectedProject?.path ?? null) ?? directory
+    void activateConfigForDirectory(configDirectory).then(() => {
+      useConfigStore.getState().applyDefaultModelAgentSelection()
+    })
+
+    if (directory && directory !== useDirectoryStore.getState().currentDirectory) {
+      useDirectoryStore.getState().setDirectory(directory)
+    }
   },
 
   // ---------------------------------------------------------------------------
@@ -656,6 +731,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       }
     })
     void activateConfigForDirectory(nextDirectory)
+
+    if (nextDirectory && nextDirectory !== useDirectoryStore.getState().currentDirectory) {
+      useDirectoryStore.getState().setDirectory(nextDirectory)
+    }
   },
 
   setDraftPreserveDirectoryOverride: (value) =>
@@ -774,6 +853,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       return { newSessionDraft: nextDraft }
     })
     void activateConfigForDirectory(nextDirectory)
+
+    if (nextDirectory && nextDirectory !== useDirectoryStore.getState().currentDirectory) {
+      useDirectoryStore.getState().setDirectory(nextDirectory)
+    }
   },
 
   resolvePendingDraftWorktreeTarget: (requestId, directory, options) =>
@@ -1408,4 +1491,13 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
 setSessionOpener((sessionID, directory) => {
   useSessionUIStore.getState().setCurrentSession(sessionID, directory)
+})
+
+// Write-through persist of the worktree map whenever discovery refreshes it.
+// Cheap reference-equality guard — this fires only when the map actually
+// changes (discovery / worktree create/remove), not on hot session updates.
+useSessionUIStore.subscribe((state, prev) => {
+  if (state.availableWorktreesByProject !== prev.availableWorktreesByProject) {
+    persistWorktreeMap(state.availableWorktreesByProject)
+  }
 })

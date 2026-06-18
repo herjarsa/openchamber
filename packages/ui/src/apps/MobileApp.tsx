@@ -5,6 +5,7 @@ import type { IconName } from '@/components/icon/icons';
 import { McpIcon } from '@/components/icons/McpIcon';
 import { McpDropdownContent } from '@/components/mcp/McpDropdown';
 import { AboutSettings } from '@/components/sections/openchamber/AboutSettings';
+import { PluginStatusPage } from '@/components/sections/plugin-status/PluginStatusPage';
 import { OpenCodeUpdateToast } from '@/components/update/OpenCodeUpdateToast';
 import { ConfigUpdateOverlay } from '@/components/ui/ConfigUpdateOverlay';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
@@ -26,7 +27,7 @@ import { opencodeClient } from '@/lib/opencode/client';
 import type { ProjectEntry, RuntimeAPIs } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
 import { resolveProjectForDirectory, resolveProjectForSessionDirectory } from '@/lib/projectResolution';
-import { formatQuotaResetLabel, formatQuotaValueLabel, formatWindowLabel, QUOTA_PROVIDERS } from '@/lib/quota';
+import { clampPercent, formatQuotaResetLabel, formatQuotaValueLabel, formatWindowLabel, QUOTA_PROVIDERS, resolveUsageTone } from '@/lib/quota';
 import { getDisplayModelName } from '@/lib/quota/model-families';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { sessionEvents } from '@/lib/sessionEvents';
@@ -103,7 +104,7 @@ const getProjectLabel = (path: string): string => {
 };
 
 type OverflowItem = {
-  key: 'files' | 'changes' | 'mcp' | 'update' | 'settings';
+  key: 'files' | 'changes' | 'mcp' | 'plugin-status' | 'update' | 'settings';
   icon?: IconName;
   iconNode?: React.ReactNode;
   label: string;
@@ -144,14 +145,61 @@ const getWindowValueClass = (window: UsageWindow): string => {
   return 'text-foreground';
 };
 
+const ContextProgressIcon: React.FC<{ percentage: number }> = ({ percentage }) => {
+  const progressPct = clampPercent(percentage) ?? 0;
+  const tone = resolveUsageTone(percentage);
+  const progressColor = tone === 'critical'
+    ? 'var(--status-error)'
+    : tone === 'warn'
+      ? 'var(--status-warning)'
+      : 'var(--status-success)';
+  const size = 18;
+  const stroke = 3;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+
+  return (
+    <svg
+      viewBox={`0 0 ${size} ${size}`}
+      className="size-[18px] -rotate-90"
+      role="progressbar"
+      aria-valuenow={Math.round(progressPct)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke="var(--interactive-border)"
+        strokeWidth={stroke}
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke={progressColor}
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - progressPct / 100)}
+        className="transition-[stroke-dashoffset,stroke] duration-300"
+      />
+    </svg>
+  );
+};
+
 const MetadataRow: React.FC<{
-  icon: IconName;
+  icon?: IconName;
+  iconNode?: React.ReactNode;
   label: string;
   children: React.ReactNode;
-}> = ({ icon, label, children }) => (
+}> = ({ icon, iconNode, label, children }) => (
   <div className="flex min-w-0 items-center gap-3 rounded-xl px-2.5 py-2.5">
     <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
-      <Icon name={icon} className="size-[18px]" />
+      {iconNode ?? (icon ? <Icon name={icon} className="size-[18px]" /> : null)}
     </span>
     <span className="shrink-0 typography-ui-label text-muted-foreground">{label}</span>
     <span className="min-w-0 flex-1 truncate text-right typography-ui-label font-medium text-foreground">
@@ -244,7 +292,10 @@ const SessionMetadataOverlay: React.FC<{
             {branchLabel}
           </MetadataRow>
           {contextDisplay ? (
-            <MetadataRow icon="pie-chart" label={t('mobile.header.metadata.context')}>
+            <MetadataRow
+              iconNode={<ContextProgressIcon percentage={contextDisplay.percentage} />}
+              label={t('mobile.header.metadata.context')}
+            >
               <span className="inline-flex items-baseline gap-1.5 tabular-nums">
                 <span className={cn('font-semibold', contextDisplay.colorClass)}>{contextDisplay.percentage.toFixed(1)}%</span>
                 <span className="text-muted-foreground">{contextDisplay.tokens}</span>
@@ -743,6 +794,7 @@ const MobileShell: React.FC = () => {
   const [filesOpen, setFilesOpen] = React.useState(false);
   const [changesOpen, setChangesOpen] = React.useState(false);
   const [mcpOpen, setMcpOpen] = React.useState(false);
+  const [pluginStatusOpen, setPluginStatusOpen] = React.useState(false);
   const [isMcpRefreshing, setIsMcpRefreshing] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [updateOpen, setUpdateOpen] = React.useState(false);
@@ -850,6 +902,12 @@ const MobileShell: React.FC = () => {
         iconNode: <McpIcon className="size-5 shrink-0 text-muted-foreground" />,
         label: t('mobile.menu.mcp'),
         onSelect: () => setMcpOpen(true),
+      },
+      {
+        key: 'plugin-status',
+        icon: 'pulse',
+        label: t('mobile.menu.pluginStatus'),
+        onSelect: () => setPluginStatusOpen(true),
       },
       ...(showUpdateItem ? [{
         key: 'update' as const,
@@ -973,7 +1031,7 @@ const MobileShell: React.FC = () => {
                 </div>
               </div>
             )}
-          >
+>
             <ErrorBoundary>
               <McpDropdownContent
                 active
@@ -985,6 +1043,20 @@ const MobileShell: React.FC = () => {
             </ErrorBoundary>
           </MobileOverlayPanel>
         ) : null}
+
+        {pluginStatusOpen ? (
+          <MobileSurfaceShell
+            open
+            onClose={() => setPluginStatusOpen(false)}
+            ariaLabel={t('mobile.menu.pluginStatus')}
+            headerless
+>
+            <ErrorBoundary>
+	            <PluginStatusPage onClose={() => setPluginStatusOpen(false)} />
+            </ErrorBoundary>
+          </MobileSurfaceShell>
+        ) : null}
+
 
         {settingsOpen ? (
           <MobileSurfaceShell
