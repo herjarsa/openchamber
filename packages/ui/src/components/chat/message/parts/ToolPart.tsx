@@ -10,12 +10,14 @@ import type { ToolPart as ToolPartType, ToolState as ToolStateUnion } from '@ope
 import { toolDisplayStyles } from '@/lib/typography';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { useOptionalThemeSystem } from '@/contexts/useThemeSystem';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useDirectorySync, useSessionMessageRecords, useEnsureSessionMessages } from '@/sync/sync-context';
 import { getSyncChildStores } from '@/sync/sync-refs';
-import { useUIStore } from '@/stores/useUIStore';
 import { useSessionActivity } from '@/hooks/useSessionActivity';
+import type { SessionActivityResult } from '@/hooks/useSessionActivity';
+import { useUIStore } from '@/stores/useUIStore';
+import { SubagentLiveOutput } from './SubagentLiveOutput';
 import { opencodeClient } from '@/lib/opencode/client';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { sessionEvents } from '@/lib/sessionEvents';
@@ -1205,13 +1207,14 @@ const TaskToolSummary: React.FC<{
     input?: Record<string, unknown>;
     animateTailText?: boolean;
     isActive?: boolean;
-}> = ({ entries, isExpanded, isMobile, output, sessionId, onShowPopup, input, animateTailText = true, isActive = false }) => {
+    messages?: MessageRecord[];
+    activity?: SessionActivityResult;
+}> = ({ entries, isExpanded, isMobile, output, sessionId, onShowPopup, input, animateTailText = true, isActive = false, messages, activity }) => {
     const { t } = useI18n();
-    const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
+    const currentDirectory = useEffectiveDirectory();
     const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
-    const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
     const showToolFileIcons = useUIStore((state) => state.showToolFileIcons);
-    const runtime = React.useContext(RuntimeAPIContext);
+
     const displayEntries = entries;
 
     const trimmedOutput = typeof output === 'string'
@@ -1223,17 +1226,7 @@ const TaskToolSummary: React.FC<{
     const handleOpenSession = (event: React.MouseEvent) => {
         event.stopPropagation();
         if (sessionId && currentDirectory) {
-            if (isMobile || runtime?.runtime.isVSCode) {
-                setCurrentSession(sessionId, currentDirectory);
-                return;
-            }
-
-            openContextPanelTab(currentDirectory, {
-                mode: 'chat',
-                dedupeKey: `session:${sessionId}`,
-                label: agentType.charAt(0).toUpperCase() + agentType.slice(1),
-                readOnly: true,
-            });
+            setCurrentSession(sessionId, currentDirectory);
         }
     };
 
@@ -1322,7 +1315,9 @@ const TaskToolSummary: React.FC<{
                     </div>
                 </ToolScrollableSection>
             ) : null}
-
+            {sessionId && isActive ? (
+                <SubagentLiveOutput messages={messages} activity={activity} sessionId={sessionId} />
+) : null}
             {sessionId && (
                 <button
                     type="button"
@@ -1928,9 +1923,10 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
 }) => {
     const state = part.state;
     const showToolFileIcons = useUIStore((s) => s.showToolFileIcons);
-    const currentDirectory = useDirectoryStore((s) => s.currentDirectory);
+    const currentDirectory = useEffectiveDirectory() ?? '';
     const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
-
+    const subagentErrorFocusTarget = useSessionUIStore((s) => s.subagentErrorFocusTarget);
+    const setSubagentErrorFocusTarget = useSessionUIStore((s) => s.setSubagentErrorFocusTarget);
     const normalizedPartTool = normalizeToolName(part.tool);
     const isTaskTool = normalizedPartTool === 'task';
 
@@ -1981,7 +1977,24 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
     const expandedContentRef = React.useRef<HTMLDivElement>(null);
     const expandedContentAnimationRef = React.useRef<AnimationPlaybackControls | null>(null);
     const expandedContentMountedRef = React.useRef(false);
+    const rootRef = React.useRef<HTMLDivElement>(null);
+    const [isErrorFocused, setIsErrorFocused] = React.useState(false);
 
+    React.useEffect(() => {
+        if (!subagentErrorFocusTarget) return;
+        if (subagentErrorFocusTarget.sessionId !== currentSessionId) return;
+        if (subagentErrorFocusTarget.messageId !== part.messageID) return;
+        if (subagentErrorFocusTarget.partId !== part.id) return;
+
+        rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setIsErrorFocused(true);
+        const timer = setTimeout(() => {
+            setIsErrorFocused(false);
+            setSubagentErrorFocusTarget(null);
+        }, 3000);
+
+        return () => clearTimeout(timer);
+    }, [subagentErrorFocusTarget, currentSessionId, part.messageID, part.id, setSubagentErrorFocusTarget]);
     React.useLayoutEffect(() => {
         if (isTaskTool) {
             return;
@@ -2660,8 +2673,8 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
         handleMainClick(event);
     };
 
-    const iconStyle = !isTaskTool && isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
-    const titleStyle = !isTaskTool && isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
+    const iconStyle = isError ? TOOL_ERROR_ICON_STYLE : TOOL_NORMAL_ICON_STYLE;
+    const titleStyle = isError ? TOOL_ERROR_TITLE_STYLE : TOOL_NORMAL_TITLE_STYLE;
     const shouldRenderExpandedContent = useAnimatedExpandedContent(isExpanded);
 
     if (!shouldTreatAsFinalized && !isActive && !isTaskTool) {
@@ -2669,7 +2682,7 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
     }
 
     return (
-        <div>
+        <div ref={rootRef} className={cn(isErrorFocused && 'ring-2 ring-status-error rounded-xl animate-pulse')}>
             {}
             <div
                 className={cn(
@@ -2806,6 +2819,8 @@ const ToolPartContent: React.FC<ToolPartProps> = ({
                     input={input}
                     animateTailText={animateTailText}
                     isActive={isActive}
+                    messages={childSessionMessages}
+                    activity={childSessionActivity}
                 />
             ) : null}
 

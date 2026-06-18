@@ -23,7 +23,7 @@ import { bootstrapGlobal, bootstrapDirectory } from "./bootstrap"
 import { retry } from "./retry"
 import { updateStreamingState } from "./streaming"
 import { setActionRefs } from "./session-actions"
-import { setSyncRefs } from "./sync-refs"
+import { setSyncRefs, getAllSyncSessions } from "./sync-refs"
 import { stripMessageDiffSnapshots, stripSessionDiffSnapshots } from "./sanitize"
 import { syncDebug } from "./debug"
 import { getReconnectCandidateSessionIds } from "./reconnect-recovery"
@@ -47,7 +47,11 @@ import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry"
 import { setSessionPrefetch } from "./session-prefetch-cache"
 import { listGlobalSessionPages } from "@/stores/globalSessions"
 import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
-
+import { assertSdkSuccess } from "./sdk-utils"
+import { isActiveSession, getActiveSession } from "./active-session"
+import { useSessionUIStore } from "./session-ui-store"
+import { areRequestArraysReferentiallyEqual, collectScopedBlockingRequests } from "./scoped-blocking-requests"
+import { EMPTY_USER_MESSAGE_HISTORY_SNAPSHOT, buildUserMessageHistorySnapshot, type UserMessageHistorySnapshot } from "./user-message-history"
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -67,33 +71,6 @@ const syncGlobal = globalThis as SyncGlobal
 const SyncContext = syncGlobal[SYNC_CONTEXT_GLOBAL_KEY] ?? createContext<SyncSystem | null>(null)
 syncGlobal[SYNC_CONTEXT_GLOBAL_KEY] = SyncContext
 
-type SdkResult<T> = {
-  data?: T
-  error?: unknown
-  response?: {
-    status?: number
-    headers?: { get?: (name: string) => string | null }
-  }
-}
-
-function formatSdkError(error: unknown): string {
-  if (error instanceof Error) return error.message
-  if (typeof error === "string") return error
-  if (error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string") {
-    return (error as { message: string }).message
-  }
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return String(error)
-  }
-}
-
-function assertSdkSuccess<T>(result: SdkResult<T>, operation: string): T | undefined {
-  if (!result.error) return result.data
-  const status = result.response?.status
-  throw new Error(`${operation} failed${status ? ` (${status})` : ""}: ${formatSdkError(result.error)}`)
-}
 
 function useSyncSystem() {
   const ctx = useContext(SyncContext)
@@ -260,6 +237,7 @@ async function materializeSessionFromServer(
   directory: string,
   sessionID: string,
   store: StoreApi<DirectoryStore>,
+  options?: { isStale?: () => boolean },
 ) {
   const scopedClient = opencodeClient.getScopedSdkClient(directory)
   const result = await retry(async () => {
@@ -278,6 +256,8 @@ async function materializeSessionFromServer(
     complete: !cursor,
   })
 
+  if (options?.isStale?.()) return
+
   store.setState((state: DirectoryStore) => {
     const materialized = materializeSessionSnapshots(
       state,
@@ -294,8 +274,6 @@ async function materializeSessionFromServer(
 
 // Module-level refs for notification viewed check.
 // Used to determine if user is currently viewing the session when a notification arrives.
-let _activeDirectory = ""
-let _activeSession = ""
 const externallyViewedSessions = new Map<string, number>()
 const EXTERNAL_VIEW_TTL_MS = 15_000
 
@@ -329,6 +307,7 @@ type UiNotificationPayload = {
   sessionId?: unknown
   directory?: unknown
   requireHidden?: unknown
+  desktopNotificationDelivered?: unknown
   desktopStdoutActive?: unknown
 }
 
@@ -349,7 +328,7 @@ const handleUiNotificationEvent = (payload: Event, fallbackDirectory: string): b
   }
 
   const notification = properties as UiNotificationPayload
-  if (notification.desktopStdoutActive === true && getRuntimeKey() === "local") {
+  if ((notification.desktopNotificationDelivered === true || notification.desktopStdoutActive === true) && getRuntimeKey() === "local") {
     return true
   }
 
@@ -373,10 +352,6 @@ const handleUiNotificationEvent = (payload: Event, fallbackDirectory: string): b
   return true
 }
 
-export function setActiveSession(directory: string, sessionId: string) {
-  _activeDirectory = directory
-  _activeSession = sessionId
-}
 
 export function setExternallyViewedSession(directory: string, sessionId: string, viewed: boolean) {
   if (!directory || !sessionId) return
@@ -398,11 +373,7 @@ function isWindowFocused(): boolean {
 
 function isViewedInCurrentSession(directory: string, sessionId?: string): boolean {
   if (!sessionId) return false
-  if (
-    _activeDirectory && _activeSession
-    && directory === _activeDirectory && sessionId === _activeSession
-    && isWindowFocused()
-  ) return true
+  if (isActiveSession(directory, sessionId) && isWindowFocused()) return true
   pruneExternallyViewedSessions()
   return externallyViewedSessions.has(viewedSessionKey(directory, sessionId))
 }
@@ -411,16 +382,42 @@ function isRecentBoot() {
   return bootingRoot || Date.now() - bootedAt < BOOT_DEBOUNCE_MS
 }
 
-function getViewedSessionMaterializationTarget(directory: string) {
-  if (!_activeDirectory || !_activeSession) return null
-  if (directory !== _activeDirectory) return null
-  return {
-    directory: _activeDirectory,
-    sessionId: _activeSession,
+
+function findParentToolPartForSubagent(
+  subagentSessionID: string,
+  state: State,
+): { parentSessionID: string; parentMessageID: string; parentPartID: string } | null {
+  const subagent = state.session.find((s) => s.id === subagentSessionID)
+  const parentID = (subagent as Session & { parentID?: string | null })?.parentID
+  if (!parentID) return null
+
+  const parentMessages = state.message[parentID]
+  if (!Array.isArray(parentMessages)) return null
+
+  for (const message of parentMessages) {
+    const parts = state.part[message.id]
+    if (!Array.isArray(parts)) continue
+    for (const part of parts) {
+      if (part.type !== "tool") continue
+      const toolPart = part as Part & { tool?: string; output?: unknown }
+      if (toolPart.tool !== "task") continue
+      const output = typeof toolPart.output === "string" ? toolPart.output : ""
+      if (output.includes(`<task id="${subagentSessionID}">`) || output.includes(`<task id='${subagentSessionID}'>`)) {
+        return { parentSessionID: parentID, parentMessageID: message.id, parentPartID: part.id }
+      }
+    }
   }
+
+  return null
 }
 
-function toSessionStatus(status: Awaited<ReturnType<typeof opencodeClient.getSessionStatus>>[string]): SessionStatus | undefined {
+function getViewedSessionMaterializationTarget(directory: string) {
+  const active = getActiveSession()
+  if (!active || directory !== active.directory) return null
+  return active
+}
+
+function toSessionStatus(status: Awaited<ReturnType<typeof opencodeClient.getSessionStatus>>[string] | undefined): SessionStatus | undefined {
   if (!status) return undefined
   if (status.type === "idle" || status.type === "busy") {
     return { type: status.type }
@@ -453,40 +450,64 @@ function getActiveSessionCandidateIds(directory: string, state: DirectoryStore):
   })
 }
 
-function buildRelevantSessionStatuses(
-  nextStatuses: Awaited<ReturnType<typeof opencodeClient.getSessionStatusForDirectory>>,
-  candidateSessionIds: string[],
-): Record<string, SessionStatus> | null {
-  if (nextStatuses === null) return null
-  const relevantStatuses: Record<string, SessionStatus> = {}
-  for (const sessionId of candidateSessionIds) {
-    relevantStatuses[sessionId] = toSessionStatus(nextStatuses[sessionId]) ?? { type: "idle" }
-  }
-  return relevantStatuses
-}
+type DirectorySessionStatusSnapshot = NonNullable<
+  Awaited<ReturnType<typeof opencodeClient.getSessionStatusForDirectory>>
+>
 
-function applySessionStatusSnapshot(
+// How a /session/status snapshot is reconciled into the store.
+//
+// The directory-scoped snapshot lists only active (busy/retry) sessions; an
+// absent candidate means "idle per this snapshot".
+//
+// - "monotonic": only confirm/raise active status. Never lowers a busy/retry
+//   session to idle. Used by the periodic watchdog poll — real idle arrives via
+//   SSE (session.status / session.idle) or via an authoritative resync that the
+//   watchdog escalates to when it detects a stale busy entry. This keeps the
+//   blind 5s poll from clobbering live state on a transient/misscoped snapshot.
+// - "authoritative": treat the snapshot as ground truth — absent/idle candidates
+//   are lowered to idle. Used by reconnect/escalated resyncs, a deliberate edge
+//   where the live server snapshot is the source of truth (mirrors the bootstrap
+//   snapshot). The snapshot wins over any derived message state here.
+type StatusSnapshotMode = "monotonic" | "authoritative"
+
+export function applySessionStatusSnapshot(
   store: StoreApi<DirectoryStore>,
-  relevantStatuses: Record<string, SessionStatus>,
+  snapshot: DirectorySessionStatusSnapshot,
+  candidateSessionIds: string[],
+  mode: StatusSnapshotMode,
 ): boolean {
-  if (Object.keys(relevantStatuses).length === 0) return false
+  if (candidateSessionIds.length === 0) return false
 
   let changed = false
   store.setState((state: DirectoryStore) => {
-    for (const [sessionId, nextStatus] of Object.entries(relevantStatuses)) {
-      if (!haveEquivalentSyncSnapshots(state.session_status?.[sessionId], nextStatus)) {
+    const current = state.session_status ?? {}
+    let next: Record<string, SessionStatus> | undefined
+    const draft = () => (next ??= { ...current })
+
+    for (const sessionId of candidateSessionIds) {
+      const incoming = toSessionStatus(snapshot[sessionId])
+
+      if (incoming && incoming.type !== "idle") {
+        // Confirm or raise active status (catches a busy event the SSE missed).
+        if (!haveEquivalentSyncSnapshots(current[sessionId], incoming)) {
+          draft()[sessionId] = incoming
+          changed = true
+        }
+        continue
+      }
+
+      // Snapshot reports this candidate idle (absent, or explicit idle).
+      // Monotonic never lowers; authoritative trusts the snapshot as truth.
+      if (mode === "monotonic") continue
+
+      const existing = current[sessionId]
+      if (existing && existing.type !== "idle") {
+        draft()[sessionId] = { type: "idle" }
         changed = true
-        break
       }
     }
 
-    if (!changed) {
-      return state
-    }
-
-    return {
-      session_status: { ...state.session_status, ...relevantStatuses },
-    }
+    return next ? { session_status: next } : state
   })
 
   return changed
@@ -496,30 +517,29 @@ async function resyncDirectorySessionStatuses(
   directory: string,
   store: StoreApi<DirectoryStore>,
   candidateSessionIds: string[],
-): Promise<Record<string, SessionStatus> | null> {
+  mode: StatusSnapshotMode,
+): Promise<DirectorySessionStatusSnapshot | null> {
   const nextStatuses = await opencodeClient.getSessionStatusForDirectory(directory)
-  // null = fetch failed; preserve existing state. {} or populated = authoritative
-  // snapshot of active sessions — candidates not listed are idle now.
-  const relevantStatuses = buildRelevantSessionStatuses(nextStatuses, candidateSessionIds)
-  if (relevantStatuses === null) return null
-  applySessionStatusSnapshot(store, relevantStatuses)
-  return relevantStatuses
+  // null = fetch failed; preserve existing state. {} or populated = a snapshot
+  // of active sessions — reconciled per `mode` (absence ≠ idle under monotonic).
+  if (nextStatuses === null) return null
+  applySessionStatusSnapshot(store, nextStatuses, candidateSessionIds, mode)
+  return nextStatuses
 }
 
-function needsSnapshotAfterStatusPoll(
+// After a monotonic poll, decide whether to escalate to a full authoritative
+// resync: the store believes the session is active but the snapshot reports it
+// idle/absent — a suspected missed idle that the monotonic poll deliberately
+// won't lower on its own. The authoritative resync is the recovery path.
+export function needsSnapshotAfterStatusPoll(
   state: DirectoryStore,
   sessionId: string,
-  nextStatus: SessionStatus | undefined,
+  snapshotEntry: DirectorySessionStatusSnapshot[string] | undefined,
 ): boolean {
-  if (nextStatus?.type !== "idle") return false
+  const incoming = toSessionStatus(snapshotEntry)
+  if (incoming && incoming.type !== "idle") return false
   const currentStatus = state.session_status?.[sessionId]
-  if (currentStatus && currentStatus.type !== "idle") return true
-
-  const messages = state.message[sessionId]
-  const lastMessage = messages?.[messages.length - 1]
-  return !!lastMessage
-    && lastMessage.role === "assistant"
-    && typeof (lastMessage as { time?: { completed?: number } }).time?.completed !== "number"
+  return Boolean(currentStatus && currentStatus.type !== "idle")
 }
 
 type EventRoutingIndex = {
@@ -1177,7 +1197,7 @@ async function resyncDirectoryAfterReconnect(
   const candidateSessionIds = getActiveSessionCandidateIds(directory, current)
   if (candidateSessionIds.length === 0) return
 
-  await resyncDirectorySessionStatuses(directory, store, candidateSessionIds)
+  await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "authoritative")
 
   const scopedClient = opencodeClient.getScopedSdkClient(directory)
   await Promise.all(candidateSessionIds.map(async (sessionId) => {
@@ -1419,35 +1439,67 @@ function handleEvent(
   if (payload.type === "session.idle" || payload.type === "session.error") {
     const props = payload.properties as { sessionID?: string; error?: { message?: string; code?: string } }
     const sessionID = props.sessionID
-    // Skip subtask sessions — only top-level sessions generate notifications
     const storeState = store.getState()
-    const session = storeState.session.find((s) => s.id === sessionID)
-    if (session && (session as { parentID?: string }).parentID) {
-      // subtask — skip notification
-    } else if (sessionID) {
+    const session = sessionID ? storeState.session.find((s) => s.id === sessionID) : undefined
+    const isSubtask = Boolean(session && (session as { parentID?: string }).parentID)
+
+    // For subtask turn-complete: skip — only surface the parent.
+    // For subtask error: always surface — a subagent failure is critical context
+    // the user needs even when the parent is the active session.
+    if (sessionID && (!isSubtask || payload.type === "session.error")) {
+      let parentRefs:
+        | { parentSessionID: string; parentMessageID: string; parentPartID: string }
+        | null = null
+
+      // For subagent errors, locate the parent tool row so the toast can navigate
+      // back to the failed task in the parent session.
+      if (isSubtask && payload.type === "session.error") {
+        parentRefs = findParentToolPartForSubagent(sessionID, storeState)
+      }
+
       appendNotification({
         directory: resolvedDirectory,
         session: sessionID,
         time: Date.now(),
         viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
         ...(payload.type === "session.error"
-          ? { type: "error" as const, error: props.error }
+          ? { type: "error" as const, error: props.error, ...parentRefs }
           : { type: "turn-complete" as const }),
       })
+
+      // Surface subagent failures as a clickable toast that jumps to the parent row.
+      if (isSubtask && payload.type === "session.error" && parentRefs) {
+        const errorMessage = props.error?.message ?? "Subagent failed"
+        toast.error(`Subagent error: ${errorMessage}`, {
+          description: "Click to open the parent session and highlight the failed task.",
+          duration: 10000,
+          action: {
+            label: "Show",
+            onClick: () => {
+              openSessionFromToast(parentRefs.parentSessionID, resolvedDirectory)
+              useSessionUIStore.getState().setSubagentErrorFocusTarget({
+                sessionId: parentRefs.parentSessionID,
+                messageId: parentRefs.parentMessageID,
+                partId: parentRefs.parentPartID,
+              })
+            },
+          },
+        })
+      }
     }
   }
 
-  // Sync-layer parent resync: when a child session goes idle, recover
-  // the parent session snapshot. This ensures the
-  // parent's task tool part reflects the child's completion even when
-  // no ToolPart component is mounted.
-  if (payload.type === "session.idle") {
-    const idleSessionId = getSessionIdFromPayload(payload)
-    if (idleSessionId && resolvedDirectory && resolvedDirectory !== "global") {
+  // Sync-layer parent resync: when a child session goes idle or errors,
+  // recover the parent session snapshot. This ensures the parent's task tool
+  // part reflects the child's completion (or failure) even when no ToolPart
+  // component is mounted.
+  if (payload.type === "session.idle" || payload.type === "session.error") {
+    const changedSessionId = getSessionIdFromPayload(payload)
+    if (changedSessionId && resolvedDirectory && resolvedDirectory !== "global") {
       const sessionState = store.getState()
-      const idleSession = sessionState.session.find((s) => s.id === idleSessionId)
-      const parentID = idleSession
-        ? (idleSession as Session & { parentID?: string | null }).parentID
+      const changedSession = sessionState.session.find((s) => s.id === changedSessionId)
+      const parentID = changedSession
+        ? (changedSession as Session & { parentID?: string | null }).parentID
         : null
       if (parentID) {
         enqueueSessionMaterialization(resolvedDirectory, parentID, childStores)
@@ -1475,8 +1527,11 @@ function handleEvent(
       break
     case "session.status":
     case "session.idle":
+      draft.session_status = { ...(current.session_status ?? {}) }
+      break
     case "session.error":
       draft.session_status = { ...(current.session_status ?? {}) }
+      draft.session_error = { ...(current.session_error ?? {}) }
       break
     case "todo.updated":
       draft.todo = { ...current.todo }
@@ -1636,7 +1691,6 @@ export function SyncProvider(props: {
             global: {
               config: globalState.config,
               projects: globalState.projects,
-              providers: globalState.providers,
             },
             loadSessions: (dir) => retry(async () => {
               const rootSessions = (await listGlobalSessionPages(props.sdk, {
@@ -1687,16 +1741,26 @@ export function SyncProvider(props: {
             }),
           })
 
-          // VS Code race: if sessions are still empty after bootstrap, OpenCode
-          // wasn't ready yet (bridge returned 503). Retry a few times.
-          const state = store.getState()
-          if (state.session.length === 0 && attempt < 5) {
-            console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
-            await new Promise((r) => setTimeout(r, 2000))
-            store.setState({ status: "loading" as const })
-            await runBootstrap(attempt + 1)
-          } else if (state.session.length === 0) {
-            console.warn(`[bootstrap] sessions empty for ${directory} after ${attempt + 1} attempts; giving up`)
+          // VS Code-only race: the bridge can answer with an empty 200 (instead
+          // of a retryable 503) while OpenCode is still warming up, which the two
+          // retry layers inside loadSessions can't catch. Re-run a few times there.
+          //
+          // On web/desktop this retry is both redundant and harmful: loadSessions
+          // already retries transient failures (listGlobalSessionPages throws on
+          // 5xx and retries internally), so an empty result here is AUTHORITATIVE —
+          // the directory genuinely has no sessions (e.g. a deleted worktree only
+          // referenced by archived sessions). Re-running the full bootstrap 6×2s
+          // per such directory is the startup log storm.
+          if (isVSCodeRuntime()) {
+            const state = store.getState()
+            if (state.session.length === 0 && attempt < 5) {
+              console.warn(`[bootstrap] sessions empty for ${directory} after attempt ${attempt + 1}; retrying in 2s`)
+              await new Promise((r) => setTimeout(r, 2000))
+              store.setState({ status: "loading" as const })
+              await runBootstrap(attempt + 1)
+            } else if (state.session.length === 0) {
+              console.warn(`[bootstrap] sessions empty for ${directory} after ${attempt + 1} attempts; giving up`)
+            }
           }
         }
 
@@ -1868,7 +1932,7 @@ export function SyncProvider(props: {
       polling.add(directory)
       try {
         const before = store.getState()
-        const statuses = await resyncDirectorySessionStatuses(directory, store, candidateSessionIds)
+        const statuses = await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "monotonic")
         if (!statuses) return
         const needsSnapshot = candidateSessionIds.some((sessionId) => (
           needsSnapshotAfterStatusPoll(before, sessionId, statuses[sessionId])
@@ -2019,11 +2083,22 @@ export function useGlobalSyncSelector<T>(selector: (state: GlobalSyncStore) => T
   return useGlobalSyncStore(selector)
 }
 
-/** Get the child store for a directory (defaults to current) */
-export function useDirectoryStore(directory?: string): StoreApi<DirectoryStore> {
+/**
+ * Get the child store for a directory (defaults to current).
+ *
+ * Pass `{ bootstrap: false }` when you only need the store reference for an
+ * on-demand `getState()` (not live subscription) and must NOT trigger a full
+ * directory bootstrap. This avoids storms of pointless session-list fetches +
+ * empty-retry loops for directories that are merely referenced by sidebar rows
+ * (e.g. archived sessions on deleted worktrees).
+ */
+export function useDirectoryStore(
+  directory?: string,
+  options?: { bootstrap?: boolean },
+): StoreApi<DirectoryStore> {
   const system = useSyncSystem()
   const dir = directory ?? system.directory
-  return system.childStores.ensureChild(dir)
+  return system.childStores.ensureChild(dir, options)
 }
 
 /** Select from the current directory's store */
@@ -2129,6 +2204,77 @@ export function useSessionQuestions(sessionID: string, directory?: string) {
 export function useSessions(directory?: string) {
   return useDirectorySync(
     useCallback((state: State) => state.session, []),
+    directory,
+  )
+}
+
+const selectPermissionRequestsBySession = (state: State) => state.permission
+const selectQuestionRequestsBySession = (state: State) => state.question
+
+type ScopedBlockingRequestCache<T extends { id: string }> = {
+  sessionID: string | null
+  sessions: Session[] | null
+  requestsBySession: Record<string, T[] | undefined> | null
+  result: T[]
+}
+
+function useScopedBlockingRequests<T extends { id: string }>(
+  sessionID: string | null,
+  directory: string | undefined,
+  selectRequestsBySession: (state: State) => Record<string, T[] | undefined>,
+  empty: T[],
+): T[] {
+  const cacheRef = useRef<ScopedBlockingRequestCache<T>>({
+    sessionID: null,
+    sessions: null,
+    requestsBySession: null,
+    result: empty,
+  })
+
+  return useDirectorySync(
+    useCallback((state: State) => {
+      const requestsBySession = selectRequestsBySession(state)
+      const cache = cacheRef.current
+      if (
+        cache.sessionID === sessionID
+        && cache.sessions === state.session
+        && cache.requestsBySession === requestsBySession
+      ) {
+        return cache.result
+      }
+
+      const next = collectScopedBlockingRequests(state.session, requestsBySession, sessionID, empty)
+      const result = areRequestArraysReferentiallyEqual(cache.result, next) ? cache.result : next
+      cacheRef.current = {
+        sessionID,
+        sessions: state.session,
+        requestsBySession,
+        result,
+      }
+      return result
+    }, [empty, selectRequestsBySession, sessionID]),
+    directory,
+  )
+}
+
+export function useScopedBlockingPermissions(sessionID: string | null, directory?: string): PermissionRequest[] {
+  return useScopedBlockingRequests(sessionID, directory, selectPermissionRequestsBySession, EMPTY_PERMISSION_REQUESTS)
+}
+
+export function useScopedBlockingQuestions(sessionID: string | null, directory?: string): QuestionRequest[] {
+  return useScopedBlockingRequests(sessionID, directory, selectQuestionRequestsBySession, EMPTY_QUESTION_REQUESTS)
+}
+
+export function useParentSession(sessionID: string | null, directory?: string): Session | null {
+  return useDirectorySync(
+    useCallback((state: State) => {
+      if (!sessionID) return null
+      const current = state.session.find((s) => s.id === sessionID)
+      if (!current?.parentID) return null
+      return state.session.find((s) => s.id === current.parentID)
+        ?? getAllSyncSessions().find((s) => s.id === current.parentID)
+        ?? null
+    }, [sessionID]),
     directory,
   )
 }
@@ -2304,14 +2450,6 @@ const getConcatenatedTextFromParts = (parts: Part[]): string => {
   return text
 }
 
-const getFirstTextFromParts = (parts: Part[]): string => {
-  for (const part of parts) {
-    const text = getPartText(part)
-    if (text.length > 0) return text
-  }
-  return ""
-}
-
 type SessionMessageRecord = { info: Message; parts: Part[] }
 const EMPTY_SESSION_MESSAGE_RECORDS: SessionMessageRecord[] = []
 
@@ -2321,6 +2459,7 @@ type SessionMessageRecordsSnapshot = {
   visibleMessages: Message[]
   revertMessageID?: string
   suspendPartUpdates: boolean
+  suspendedPartUpdatesMessageID?: string
   list: SessionMessageRecord[]
   byId: Map<string, SessionMessageRecord>
 }
@@ -2332,8 +2471,12 @@ const MOBILE_SESSION_MESSAGE_RECORDS_CACHE_MAX = 4
 const MOBILE_SESSION_MESSAGE_RECORDS_CACHE_MAX_MESSAGES = 30
 const sessionMessageRecordsCache = new WeakMap<StoreApi<DirectoryStore>, Map<string, SessionMessageRecordsSnapshot>>()
 
-const getSessionMessageRecordsCacheKey = (sessionID: string, suspendPartUpdates: boolean): string => (
-  `${sessionID}\u0000${suspendPartUpdates ? 1 : 0}`
+const getSessionMessageRecordsCacheKey = (
+  sessionID: string,
+  suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
+): string => (
+  `${sessionID}\u0000${suspendPartUpdates ? 1 : 0}\u0000${suspendedPartUpdatesMessageID ?? ""}`
 )
 
 const getSessionMessageRecordsCache = (store: StoreApi<DirectoryStore>): Map<string, SessionMessageRecordsSnapshot> => {
@@ -2349,10 +2492,11 @@ const readCachedSessionMessageRecordsSnapshot = (
   store: StoreApi<DirectoryStore>,
   sessionID: string,
   suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot | undefined => {
   const cache = sessionMessageRecordsCache.get(store)
   if (!cache) return undefined
-  const key = getSessionMessageRecordsCacheKey(sessionID, suspendPartUpdates)
+  const key = getSessionMessageRecordsCacheKey(sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
   const cached = cache.get(key)
   if (!cached) return undefined
   cache.delete(key)
@@ -2366,7 +2510,11 @@ const rememberSessionMessageRecordsSnapshot = (
 ): void => {
   if (!snapshot.sessionID) return
   const cache = getSessionMessageRecordsCache(store)
-  const key = getSessionMessageRecordsCacheKey(snapshot.sessionID, snapshot.suspendPartUpdates)
+  const key = getSessionMessageRecordsCacheKey(
+    snapshot.sessionID,
+    snapshot.suspendPartUpdates,
+    snapshot.suspendedPartUpdatesMessageID,
+  )
   const constrainedMaxMessages = isVSCodeRuntime()
     ? VSCODE_SESSION_MESSAGE_RECORDS_CACHE_MAX_MESSAGES
     : isMobileSurfaceRuntime()
@@ -2398,17 +2546,23 @@ export function dropCachedSessionMessageRecordsSnapshots(
   if (!cache) return
   for (const sessionID of sessionIDs) {
     if (!sessionID) continue
-    cache.delete(getSessionMessageRecordsCacheKey(sessionID, false))
-    cache.delete(getSessionMessageRecordsCacheKey(sessionID, true))
+    const prefix = `${sessionID}\u0000`
+    for (const key of [...cache.keys()]) {
+      if (key.startsWith(prefix)) {
+        cache.delete(key)
+      }
+    }
   }
 }
 
 const snapshotPartsMatchState = (snapshot: SessionMessageRecordsSnapshot, state: State): boolean => {
-  if (snapshot.suspendPartUpdates) {
-    return true
-  }
-
   for (const record of snapshot.list) {
+    if (snapshot.suspendPartUpdates) {
+      const suspendedID = snapshot.suspendedPartUpdatesMessageID
+      if (!suspendedID || record.info.id === suspendedID) {
+        continue
+      }
+    }
     if ((state.part[record.info.id] ?? EMPTY_PARTS) !== record.parts) {
       return false
     }
@@ -2422,8 +2576,9 @@ const getReusableSessionMessageRecordsSnapshot = (
   state: State,
   sessionID: string,
   suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot | undefined => {
-  const cached = readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates)
+  const cached = readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
   if (!cached) return undefined
   const sourceMessages = state.message[sessionID] ?? EMPTY_MESSAGES
   const session = state.session.find((candidate) => candidate.id === sessionID)
@@ -2432,6 +2587,7 @@ const getReusableSessionMessageRecordsSnapshot = (
     cached.sourceMessages === sourceMessages
     && cached.revertMessageID === revertMessageID
     && cached.suspendPartUpdates === suspendPartUpdates
+    && cached.suspendedPartUpdatesMessageID === suspendedPartUpdatesMessageID
     && snapshotPartsMatchState(cached, state)
   ) {
     return cached
@@ -2472,12 +2628,16 @@ export function buildSessionMessageRecordsSnapshot(
   sessionID: string,
   previous?: SessionMessageRecordsSnapshot,
   suspendPartUpdates = false,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot {
   const { sourceMessages, visibleMessages, revertMessageID } = getVisibleMessagesForSession(state, sessionID, previous)
   const nextById = new Map<string, SessionMessageRecord>()
   const nextList = visibleMessages.map((message) => {
     const previousRecord = previous?.byId.get(message.id)
-    const parts = suspendPartUpdates && previousRecord
+    const shouldSuspendParts = suspendPartUpdates
+      && previousRecord
+      && (!suspendedPartUpdatesMessageID || message.id === suspendedPartUpdatesMessageID)
+    const parts = shouldSuspendParts
       ? previousRecord.parts
       : (state.part[message.id] ?? EMPTY_PARTS)
 
@@ -2491,6 +2651,8 @@ export function buildSessionMessageRecordsSnapshot(
 
   const unchanged = Boolean(previous)
     && previous?.visibleMessages === visibleMessages
+    && previous.suspendPartUpdates === suspendPartUpdates
+    && previous.suspendedPartUpdatesMessageID === suspendedPartUpdatesMessageID
     && previous.list.length === nextList.length
     && previous.list.every((record, index) => record === nextList[index])
 
@@ -2504,6 +2666,7 @@ export function buildSessionMessageRecordsSnapshot(
     visibleMessages,
     revertMessageID,
     suspendPartUpdates,
+    suspendedPartUpdatesMessageID,
     list: nextList,
     byId: nextById,
   }
@@ -2533,20 +2696,21 @@ export function useSessionTextMessages(sessionID: string, directory?: string): S
 }
 
 export function useUserMessageHistory(sessionID: string, directory?: string): string[] {
-  const records = useSessionMessageRecords(sessionID, directory)
-  const userMessages = useMemo(() => records.filter((record) => record.info.role === 'user'), [records])
+  const store = useDirectoryStore(directory)
+  const snapshotRef = useRef<UserMessageHistorySnapshot>(EMPTY_USER_MESSAGE_HISTORY_SNAPSHOT)
 
-  return useMemo(() => {
-    const history: string[] = []
-    for (let index = userMessages.length - 1; index >= 0; index -= 1) {
-      const message = userMessages[index]
-      const text = getFirstTextFromParts(message.parts)
-      if (text.length > 0) {
-        history.push(text)
-      }
-    }
-    return history
-  }, [userMessages])
+  const getSnapshot = useCallback(() => {
+    const next = buildUserMessageHistorySnapshot(store.getState(), sessionID, snapshotRef.current)
+    snapshotRef.current = next
+    return next.history
+  }, [sessionID, store])
+
+  const subscribe = useCallback((notify: () => void) => {
+    if (!sessionID) return () => undefined
+    return store.subscribe(notify)
+  }, [sessionID, store])
+
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 /**
@@ -2559,7 +2723,7 @@ export function useUserMessageHistory(sessionID: string, directory?: string): st
 export function useSessionMessageRecords(
   sessionID: string,
   directory?: string,
-  options?: { suspendPartUpdates?: boolean },
+  options?: { suspendPartUpdates?: boolean; suspendPartUpdatesForMessageId?: string | null },
 ) {
   const store = useDirectoryStore(directory)
   const snapshotRef = useRef<SessionMessageRecordsSnapshot>({
@@ -2568,6 +2732,7 @@ export function useSessionMessageRecords(
     visibleMessages: EMPTY_MESSAGES,
     revertMessageID: undefined,
     suspendPartUpdates: Boolean(options?.suspendPartUpdates),
+    suspendedPartUpdatesMessageID: options?.suspendPartUpdatesForMessageId ?? undefined,
     list: [],
     byId: new Map(),
   })
@@ -2579,7 +2744,14 @@ export function useSessionMessageRecords(
 
     const state = store.getState()
     const suspendPartUpdates = Boolean(options?.suspendPartUpdates)
-    const reusableSnapshot = getReusableSessionMessageRecordsSnapshot(store, state, sessionID, suspendPartUpdates)
+    const suspendedPartUpdatesMessageID = options?.suspendPartUpdatesForMessageId ?? undefined
+    const reusableSnapshot = getReusableSessionMessageRecordsSnapshot(
+      store,
+      state,
+      sessionID,
+      suspendPartUpdates,
+      suspendedPartUpdatesMessageID,
+    )
     if (reusableSnapshot) {
       snapshotRef.current = reusableSnapshot
       return reusableSnapshot.list
@@ -2587,18 +2759,19 @@ export function useSessionMessageRecords(
 
     const previousSnapshot = snapshotRef.current.sessionID === sessionID
       ? snapshotRef.current
-      : readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates)
+      : readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
 
     const nextSnapshot = buildSessionMessageRecordsSnapshot(
       state,
       sessionID,
       previousSnapshot,
       suspendPartUpdates,
+      suspendedPartUpdatesMessageID,
     )
     snapshotRef.current = nextSnapshot
     rememberSessionMessageRecordsSnapshot(store, nextSnapshot)
     return nextSnapshot.list
-  }, [options?.suspendPartUpdates, sessionID, store])
+  }, [options?.suspendPartUpdates, options?.suspendPartUpdatesForMessageId, sessionID, store])
 
   const subscribe = useCallback((notify: () => void) => {
     if (!sessionID) return () => undefined
@@ -2627,6 +2800,7 @@ export function useEnsureSessionMessages(sessionID: string, directory?: string) 
   const syncDirectory = useSyncDirectory()
   const resolvedDirectory = directory ?? syncDirectory
   const store = useDirectoryStore(resolvedDirectory)
+  const requestGenerationRef = React.useRef(0)
 
   React.useEffect(() => {
     if (!sessionID) return
@@ -2641,11 +2815,14 @@ export function useEnsureSessionMessages(sessionID: string, directory?: string) 
     // Already loading this session for this directory
     if (_ensureMessagesLoading.has(loadingKey)) return
 
+    const generation = ++requestGenerationRef.current
+    const isStale = () => generation !== requestGenerationRef.current
+
     _ensureMessagesLoading.add(loadingKey)
 
     void (async () => {
       try {
-        await materializeSessionFromServer(resolvedDirectory, sessionID, store)
+        await materializeSessionFromServer(resolvedDirectory, sessionID, store, { isStale })
       } catch {
         // Transient failure — next navigation or reconnect will retry
       } finally {
