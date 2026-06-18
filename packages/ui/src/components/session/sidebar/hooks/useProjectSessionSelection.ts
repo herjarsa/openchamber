@@ -27,7 +27,7 @@ type Args = {
   hasLoadedGlobalSessions: boolean;
 };
 
-export const useProjectSessionSelection = (args: Args): { currentSessionDirectory: string | null } => {
+export const useProjectSessionSelection = (args: Args): void => {
   const {
     projectSections,
     activeProjectId,
@@ -103,6 +103,7 @@ export const useProjectSessionSelection = (args: Args): { currentSessionDirector
     if (previousActiveProjectRef.current === activeProjectId) {
       return;
     }
+
     const section = projectSections.find((item) => item.project.id === activeProjectId);
     if (!section) {
       return;
@@ -180,20 +181,4 @@ export const useProjectSessionSelection = (args: Args): { currentSessionDirector
     });
   }, [activeProjectId, currentSessionId, projectSessionMeta, setActiveSessionByProject]);
 
-  const currentSessionDirectory = React.useMemo(() => {
-    if (!currentSessionId) {
-      return null;
-    }
-    const metadataPath = worktreeMetadata.get(currentSessionId)?.path;
-    if (metadataPath) {
-      return normalizePath(metadataPath) ?? metadataPath;
-    }
-    const activeSession = sessions.find((session) => session.id === currentSessionId);
-    if (!activeSession) {
-      return null;
-    }
-    return normalizePath((activeSession as Session & { directory?: string | null }).directory ?? null);
-  }, [currentSessionId, sessions, worktreeMetadata]);
-
-  return { currentSessionDirectory };
 };
