@@ -524,6 +524,7 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const expandedParents = useMobileSessionExpansionStore((state) => state.expandedParents);
   const toggleParent = useMobileSessionExpansionStore((state) => state.toggleParent);
   const showSubagentSessionsInSidebar = useUIStore((state) => state.showSubagentSessionsInSidebar);
+  const setShowSubagentSessionsInSidebar = useUIStore((state) => state.setShowSubagentSessionsInSidebar);
   const [query, setQuery] = React.useState('');
   const [editingProjectId, setEditingProjectId] = React.useState<string | null>(null);
   const [confirmingArchiveSessionId, setConfirmingArchiveSessionId] = React.useState<string | null>(null);
@@ -1040,7 +1041,31 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
               </button>
             ) : null}
           </div>
-        </div>
+          <label className="mt-2 flex items-center justify-between gap-2 text-sm text-muted-foreground">
+            <span className="flex flex-col">
+              <span>{t('mobile.sessions.subagent.toggle')}</span>
+              <span className="typography-meta text-muted-foreground/80">{t('mobile.sessions.subagent.toggleDescription')}</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showSubagentSessionsInSidebar}
+              onClick={() => setShowSubagentSessionsInSidebar(!showSubagentSessionsInSidebar)}
+              className={cn(
+                'relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors',
+                showSubagentSessionsInSidebar ? 'border-primary bg-primary' : 'border-border bg-muted',
+              )}
+              style={{ touchAction: 'manipulation' }}
+            >
+              <span
+                className={cn(
+                  'absolute top-0.5 size-5 rounded-full bg-background shadow transition-transform',
+                  showSubagentSessionsInSidebar ? 'translate-x-5' : 'translate-x-0.5',
+                )}
+              />
+            </button>
+          </label>
+</div>
 
         <ScrollShadow className="min-h-0 flex-1 overflow-y-auto pb-4">
           {projectsMeta.length === 0 ? (

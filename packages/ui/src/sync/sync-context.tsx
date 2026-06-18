@@ -23,7 +23,7 @@ import { bootstrapGlobal, bootstrapDirectory } from "./bootstrap"
 import { retry } from "./retry"
 import { updateStreamingState } from "./streaming"
 import { setActionRefs } from "./session-actions"
-import { setSyncRefs } from "./sync-refs"
+import { setSyncRefs, getAllSyncSessions } from "./sync-refs"
 import { stripMessageDiffSnapshots, stripSessionDiffSnapshots } from "./sanitize"
 import { syncDebug } from "./debug"
 import { getReconnectCandidateSessionIds } from "./reconnect-recovery"
@@ -33,7 +33,6 @@ import { useConfigStore } from "@/stores/useConfigStore"
 import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
-import { subagentNotificationBatcher } from './subagent-notification-batcher'
 import { applyGlobalSessionStatusEvent } from "./global-session-status"
 import type { State } from "./types"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
@@ -48,8 +47,9 @@ import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry"
 import { setSessionPrefetch } from "./session-prefetch-cache"
 import { listGlobalSessionPages } from "@/stores/globalSessions"
 import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
-import { assertSdkSuccess } from "./sdk-utils"
-import { isActiveSession, getActiveSession } from "./active-session"
+import { areRequestArraysReferentiallyEqual, collectScopedBlockingRequests } from "./scoped-blocking-requests"
+import { EMPTY_USER_MESSAGE_HISTORY_SNAPSHOT, buildUserMessageHistorySnapshot, type UserMessageHistorySnapshot } from "./user-message-history"
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -69,6 +69,33 @@ const syncGlobal = globalThis as SyncGlobal
 const SyncContext = syncGlobal[SYNC_CONTEXT_GLOBAL_KEY] ?? createContext<SyncSystem | null>(null)
 syncGlobal[SYNC_CONTEXT_GLOBAL_KEY] = SyncContext
 
+type SdkResult<T> = {
+  data?: T
+  error?: unknown
+  response?: {
+    status?: number
+    headers?: { get?: (name: string) => string | null }
+  }
+}
+
+function formatSdkError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message
+  }
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+function assertSdkSuccess<T>(result: SdkResult<T>, operation: string): T | undefined {
+  if (!result.error) return result.data
+  const status = result.response?.status
+  throw new Error(`${operation} failed${status ? ` (${status})` : ""}: ${formatSdkError(result.error)}`)
+}
 
 function useSyncSystem() {
   const ctx = useContext(SyncContext)
@@ -235,6 +262,7 @@ async function materializeSessionFromServer(
   directory: string,
   sessionID: string,
   store: StoreApi<DirectoryStore>,
+  options?: { isStale?: () => boolean },
 ) {
   const scopedClient = opencodeClient.getScopedSdkClient(directory)
   const result = await retry(async () => {
@@ -253,6 +281,8 @@ async function materializeSessionFromServer(
     complete: !cursor,
   })
 
+  if (options?.isStale?.()) return
+
   store.setState((state: DirectoryStore) => {
     const materialized = materializeSessionSnapshots(
       state,
@@ -269,6 +299,8 @@ async function materializeSessionFromServer(
 
 // Module-level refs for notification viewed check.
 // Used to determine if user is currently viewing the session when a notification arrives.
+let _activeDirectory = ""
+let _activeSession = ""
 const externallyViewedSessions = new Map<string, number>()
 const EXTERNAL_VIEW_TTL_MS = 15_000
 
@@ -302,6 +334,7 @@ type UiNotificationPayload = {
   sessionId?: unknown
   directory?: unknown
   requireHidden?: unknown
+  desktopNotificationDelivered?: unknown
   desktopStdoutActive?: unknown
 }
 
@@ -322,7 +355,7 @@ const handleUiNotificationEvent = (payload: Event, fallbackDirectory: string): b
   }
 
   const notification = properties as UiNotificationPayload
-  if (notification.desktopStdoutActive === true && getRuntimeKey() === "local") {
+  if ((notification.desktopNotificationDelivered === true || notification.desktopStdoutActive === true) && getRuntimeKey() === "local") {
     return true
   }
 
@@ -346,6 +379,10 @@ const handleUiNotificationEvent = (payload: Event, fallbackDirectory: string): b
   return true
 }
 
+export function setActiveSession(directory: string, sessionId: string) {
+  _activeDirectory = directory
+  _activeSession = sessionId
+}
 
 export function setExternallyViewedSession(directory: string, sessionId: string, viewed: boolean) {
   if (!directory || !sessionId) return
@@ -367,7 +404,11 @@ function isWindowFocused(): boolean {
 
 function isViewedInCurrentSession(directory: string, sessionId?: string): boolean {
   if (!sessionId) return false
-  if (isActiveSession(directory, sessionId) && isWindowFocused()) return true
+  if (
+    _activeDirectory && _activeSession
+    && directory === _activeDirectory && sessionId === _activeSession
+    && isWindowFocused()
+  ) return true
   pruneExternallyViewedSessions()
   return externallyViewedSessions.has(viewedSessionKey(directory, sessionId))
 }
@@ -376,39 +417,13 @@ function isRecentBoot() {
   return bootingRoot || Date.now() - bootedAt < BOOT_DEBOUNCE_MS
 }
 
-
-export function findParentToolPartForSubagent(
-  subagentSessionID: string,
-  state: State,
-): { parentSessionID: string; parentMessageID: string; parentPartID: string } | null {
-  const subagent = state.session.find((s) => s.id === subagentSessionID)
-  const parentID = (subagent as Session & { parentID?: string | null })?.parentID
-  if (!parentID) return null
-
-  const parentMessages = state.message[parentID]
-  if (!Array.isArray(parentMessages)) return null
-
-  for (const message of parentMessages) {
-    const parts = state.part[message.id]
-    if (!Array.isArray(parts)) continue
-    for (const part of parts) {
-      if (part.type !== "tool") continue
-      const toolPart = part as Part & { tool?: string; output?: unknown }
-      if (toolPart.tool !== "task") continue
-      const output = typeof toolPart.output === "string" ? toolPart.output : ""
-      if (output.includes(`<task id="${subagentSessionID}">`) || output.includes(`<task id='${subagentSessionID}'>`)) {
-        return { parentSessionID: parentID, parentMessageID: message.id, parentPartID: part.id }
-      }
-    }
-  }
-
-  return null
-}
-
 function getViewedSessionMaterializationTarget(directory: string) {
-  const active = getActiveSession()
-  if (!active || directory !== active.directory) return null
-  return active
+  if (!_activeDirectory || !_activeSession) return null
+  if (directory !== _activeDirectory) return null
+  return {
+    directory: _activeDirectory,
+    sessionId: _activeSession,
+  }
 }
 
 function toSessionStatus(status: Awaited<ReturnType<typeof opencodeClient.getSessionStatus>>[string] | undefined): SessionStatus | undefined {
@@ -1194,7 +1209,6 @@ async function resyncDirectoryAfterReconnect(
   await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "authoritative")
 
   const scopedClient = opencodeClient.getScopedSdkClient(directory)
-  const resyncedChildSessions = new Set<string>()
   await Promise.all(candidateSessionIds.map(async (sessionId) => {
     const [sessionResponse, messageResponse] = await Promise.all([
       retry(async () => {
@@ -1226,10 +1240,6 @@ async function resyncDirectoryAfterReconnect(
       .map((record) => stripMessageDiffSnapshots(record.info))
       .sort((a, b) => cmp(a.id, b.id))
 
-    // Track child sessions for parent resync
-    if (nextSession.parentID) {
-      resyncedChildSessions.add(nextSession.id)
-    }
     store.setState((state: DirectoryStore) => {
       const sessionIndex = state.session.findIndex((item) => item.id === nextSession.id)
       let sessions = state.session
@@ -1276,61 +1286,9 @@ async function resyncDirectoryAfterReconnect(
     setIndexedSessionMessages(routingIndex, sessionId, directory, nextMessages)
   }))
 
-  // Resync parent sessions to update tool parts that reference child sessions
-  // This covers SSE reconnect where child sessions complete during disconnect,
-  // but parent session tool parts don't get the updated tool state/output.
-  // IMPORTANT: Must run BEFORE ingestDirectoryStateIntoRoutingIndex so the
-  // routing index reflects the updated parent session messages/parts.
-  if (resyncedChildSessions.size > 0) {
-    const parentSessionIds = new Set<string>()
-    for (const childSessionId of resyncedChildSessions) {
-      const childSession = store.getState().session.find((s) => s.id === childSessionId)
-      if (childSession?.parentID) {
-        parentSessionIds.add(childSession.parentID)
-      }
-    }
-
-    await Promise.all(Array.from(parentSessionIds).map(async (parentSessionId) => {
-      const messageResponse = await retry(async () => {
-        const response = await scopedClient.session.messages({ sessionID: parentSessionId, limit: RECONNECT_MESSAGE_LIMIT })
-        assertSdkSuccess(response, "session.messages")
-        return response
-      }).catch(() => null)
-      const records = messageResponse?.data
-      if (!records) return
-
-      const nextMessages = records
-        .filter((record) => !!record?.info?.id)
-        .map((record) => stripMessageDiffSnapshots(record.info))
-        .sort((a, b) => cmp(a.id, b.id))
-      const nextMessageIds = new Set(nextMessages.map((message) => message.id))
-
-      store.setState((state: DirectoryStore) => {
-        const nextPartState = { ...state.part }
-        const previousMessages = state.message[parentSessionId] ?? []
-        for (const message of previousMessages) {
-          if (!nextMessageIds.has(message.id)) {
-            delete nextPartState[message.id]
-          }
-        }
-        for (const record of records) {
-          const messageId = record?.info?.id
-          if (!messageId) continue
-          nextPartState[messageId] = (record.parts ?? [])
-            .filter((part) => !!part?.id && !RECONNECT_SKIP_PARTS.has(part.type))
-            .sort((a: { id: string }, b: { id: string }) => cmp(a.id, b.id))
-        }
-
-        return {
-          message: { ...state.message, [parentSessionId]: nextMessages },
-          part: nextPartState,
-        }
-      })
-    }))
-  }
+  await resyncBlockingRequestsForDirectory(directory, store, candidateSessionIds)
 
   ingestDirectoryStateIntoRoutingIndex(routingIndex, directory, store.getState())
-
 }
 
 function handleEvent(
@@ -1490,51 +1448,35 @@ function handleEvent(
   if (payload.type === "session.idle" || payload.type === "session.error") {
     const props = payload.properties as { sessionID?: string; error?: { message?: string; code?: string } }
     const sessionID = props.sessionID
+    // Skip subtask sessions — only top-level sessions generate notifications
     const storeState = store.getState()
-    const session = sessionID ? storeState.session.find((s) => s.id === sessionID) : undefined
-    const isSubtask = Boolean(session && (session as { parentID?: string }).parentID)
-
-    if (sessionID) {
-      if (isSubtask) {
-        // Route subtask events to the batcher — it groups and emits consolidated
-        // notifications for sibling subagents.
-        subagentNotificationBatcher.queue(
-          {
-            directory: resolvedDirectory,
-            sessionID,
-            parentID: (session as { parentID?: string }).parentID!,
-            type: payload.type === "session.error" ? "error" : "idle",
-            ...(payload.type === "session.error" ? { error: props.error } : {}),
-            time: Date.now(),
-          },
-          () => store.getState(),
-        )
-      } else {
-        // Non-subtask sessions use the existing notification flow unchanged.
-        appendNotification({
-          directory: resolvedDirectory,
-          session: sessionID,
-          time: Date.now(),
-          viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
-          ...(payload.type === "session.error"
-            ? { type: "error" as const, error: props.error }
-            : { type: "turn-complete" as const }),
-        })
-      }
+    const session = storeState.session.find((s) => s.id === sessionID)
+    if (session && (session as { parentID?: string }).parentID) {
+      // subtask — skip notification
+    } else if (sessionID) {
+      appendNotification({
+        directory: resolvedDirectory,
+        session: sessionID,
+        time: Date.now(),
+        viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
+        ...(payload.type === "session.error"
+          ? { type: "error" as const, error: props.error }
+          : { type: "turn-complete" as const }),
+      })
     }
   }
 
-  // Sync-layer parent resync: when a child session goes idle or errors,
-  // recover the parent session snapshot. This ensures the parent's task tool
-  // part reflects the child's completion (or failure) even when no ToolPart
-  // component is mounted.
-  if (payload.type === "session.idle" || payload.type === "session.error") {
-    const changedSessionId = getSessionIdFromPayload(payload)
-    if (changedSessionId && resolvedDirectory && resolvedDirectory !== "global") {
+  // Sync-layer parent resync: when a child session goes idle, recover
+  // the parent session snapshot. This ensures the
+  // parent's task tool part reflects the child's completion even when
+  // no ToolPart component is mounted.
+  if (payload.type === "session.idle") {
+    const idleSessionId = getSessionIdFromPayload(payload)
+    if (idleSessionId && resolvedDirectory && resolvedDirectory !== "global") {
       const sessionState = store.getState()
-      const changedSession = sessionState.session.find((s) => s.id === changedSessionId)
-      const parentID = changedSession
-        ? (changedSession as Session & { parentID?: string | null }).parentID
+      const idleSession = sessionState.session.find((s) => s.id === idleSessionId)
+      const parentID = idleSession
+        ? (idleSession as Session & { parentID?: string | null }).parentID
         : null
       if (parentID) {
         enqueueSessionMaterialization(resolvedDirectory, parentID, childStores)
@@ -1562,11 +1504,8 @@ function handleEvent(
       break
     case "session.status":
     case "session.idle":
-      draft.session_status = { ...(current.session_status ?? {}) }
-      break
     case "session.error":
       draft.session_status = { ...(current.session_status ?? {}) }
-      draft.session_error = { ...(current.session_error ?? {}) }
       break
     case "todo.updated":
       draft.todo = { ...current.todo }
@@ -1726,7 +1665,6 @@ export function SyncProvider(props: {
             global: {
               config: globalState.config,
               projects: globalState.projects,
-              providers: globalState.providers,
             },
             loadSessions: (dir) => retry(async () => {
               const rootSessions = (await listGlobalSessionPages(props.sdk, {
@@ -2244,6 +2182,77 @@ export function useSessions(directory?: string) {
   )
 }
 
+const selectPermissionRequestsBySession = (state: State) => state.permission
+const selectQuestionRequestsBySession = (state: State) => state.question
+
+type ScopedBlockingRequestCache<T extends { id: string }> = {
+  sessionID: string | null
+  sessions: Session[] | null
+  requestsBySession: Record<string, T[] | undefined> | null
+  result: T[]
+}
+
+function useScopedBlockingRequests<T extends { id: string }>(
+  sessionID: string | null,
+  directory: string | undefined,
+  selectRequestsBySession: (state: State) => Record<string, T[] | undefined>,
+  empty: T[],
+): T[] {
+  const cacheRef = useRef<ScopedBlockingRequestCache<T>>({
+    sessionID: null,
+    sessions: null,
+    requestsBySession: null,
+    result: empty,
+  })
+
+  return useDirectorySync(
+    useCallback((state: State) => {
+      const requestsBySession = selectRequestsBySession(state)
+      const cache = cacheRef.current
+      if (
+        cache.sessionID === sessionID
+        && cache.sessions === state.session
+        && cache.requestsBySession === requestsBySession
+      ) {
+        return cache.result
+      }
+
+      const next = collectScopedBlockingRequests(state.session, requestsBySession, sessionID, empty)
+      const result = areRequestArraysReferentiallyEqual(cache.result, next) ? cache.result : next
+      cacheRef.current = {
+        sessionID,
+        sessions: state.session,
+        requestsBySession,
+        result,
+      }
+      return result
+    }, [empty, selectRequestsBySession, sessionID]),
+    directory,
+  )
+}
+
+export function useScopedBlockingPermissions(sessionID: string | null, directory?: string): PermissionRequest[] {
+  return useScopedBlockingRequests(sessionID, directory, selectPermissionRequestsBySession, EMPTY_PERMISSION_REQUESTS)
+}
+
+export function useScopedBlockingQuestions(sessionID: string | null, directory?: string): QuestionRequest[] {
+  return useScopedBlockingRequests(sessionID, directory, selectQuestionRequestsBySession, EMPTY_QUESTION_REQUESTS)
+}
+
+export function useParentSession(sessionID: string | null, directory?: string): Session | null {
+  return useDirectorySync(
+    useCallback((state: State) => {
+      if (!sessionID) return null
+      const current = state.session.find((s) => s.id === sessionID)
+      if (!current?.parentID) return null
+      return state.session.find((s) => s.id === current.parentID)
+        ?? getAllSyncSessions().find((s) => s.id === current.parentID)
+        ?? null
+    }, [sessionID]),
+    directory,
+  )
+}
+
 const getSidebarSessionSignature = (session: Session, stableUpdatedAt: number): string => {
   const directory = (session as Session & { directory?: string | null }).directory ?? ''
   const parentID = (session as Session & { parentID?: string | null }).parentID ?? ''
@@ -2415,14 +2424,6 @@ const getConcatenatedTextFromParts = (parts: Part[]): string => {
   return text
 }
 
-const getFirstTextFromParts = (parts: Part[]): string => {
-  for (const part of parts) {
-    const text = getPartText(part)
-    if (text.length > 0) return text
-  }
-  return ""
-}
-
 type SessionMessageRecord = { info: Message; parts: Part[] }
 const EMPTY_SESSION_MESSAGE_RECORDS: SessionMessageRecord[] = []
 
@@ -2432,6 +2433,7 @@ type SessionMessageRecordsSnapshot = {
   visibleMessages: Message[]
   revertMessageID?: string
   suspendPartUpdates: boolean
+  suspendedPartUpdatesMessageID?: string
   list: SessionMessageRecord[]
   byId: Map<string, SessionMessageRecord>
 }
@@ -2443,8 +2445,12 @@ const MOBILE_SESSION_MESSAGE_RECORDS_CACHE_MAX = 4
 const MOBILE_SESSION_MESSAGE_RECORDS_CACHE_MAX_MESSAGES = 30
 const sessionMessageRecordsCache = new WeakMap<StoreApi<DirectoryStore>, Map<string, SessionMessageRecordsSnapshot>>()
 
-const getSessionMessageRecordsCacheKey = (sessionID: string, suspendPartUpdates: boolean): string => (
-  `${sessionID}\u0000${suspendPartUpdates ? 1 : 0}`
+const getSessionMessageRecordsCacheKey = (
+  sessionID: string,
+  suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
+): string => (
+  `${sessionID}\u0000${suspendPartUpdates ? 1 : 0}\u0000${suspendedPartUpdatesMessageID ?? ""}`
 )
 
 const getSessionMessageRecordsCache = (store: StoreApi<DirectoryStore>): Map<string, SessionMessageRecordsSnapshot> => {
@@ -2460,10 +2466,11 @@ const readCachedSessionMessageRecordsSnapshot = (
   store: StoreApi<DirectoryStore>,
   sessionID: string,
   suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot | undefined => {
   const cache = sessionMessageRecordsCache.get(store)
   if (!cache) return undefined
-  const key = getSessionMessageRecordsCacheKey(sessionID, suspendPartUpdates)
+  const key = getSessionMessageRecordsCacheKey(sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
   const cached = cache.get(key)
   if (!cached) return undefined
   cache.delete(key)
@@ -2477,7 +2484,11 @@ const rememberSessionMessageRecordsSnapshot = (
 ): void => {
   if (!snapshot.sessionID) return
   const cache = getSessionMessageRecordsCache(store)
-  const key = getSessionMessageRecordsCacheKey(snapshot.sessionID, snapshot.suspendPartUpdates)
+  const key = getSessionMessageRecordsCacheKey(
+    snapshot.sessionID,
+    snapshot.suspendPartUpdates,
+    snapshot.suspendedPartUpdatesMessageID,
+  )
   const constrainedMaxMessages = isVSCodeRuntime()
     ? VSCODE_SESSION_MESSAGE_RECORDS_CACHE_MAX_MESSAGES
     : isMobileSurfaceRuntime()
@@ -2509,17 +2520,23 @@ export function dropCachedSessionMessageRecordsSnapshots(
   if (!cache) return
   for (const sessionID of sessionIDs) {
     if (!sessionID) continue
-    cache.delete(getSessionMessageRecordsCacheKey(sessionID, false))
-    cache.delete(getSessionMessageRecordsCacheKey(sessionID, true))
+    const prefix = `${sessionID}\u0000`
+    for (const key of [...cache.keys()]) {
+      if (key.startsWith(prefix)) {
+        cache.delete(key)
+      }
+    }
   }
 }
 
 const snapshotPartsMatchState = (snapshot: SessionMessageRecordsSnapshot, state: State): boolean => {
-  if (snapshot.suspendPartUpdates) {
-    return true
-  }
-
   for (const record of snapshot.list) {
+    if (snapshot.suspendPartUpdates) {
+      const suspendedID = snapshot.suspendedPartUpdatesMessageID
+      if (!suspendedID || record.info.id === suspendedID) {
+        continue
+      }
+    }
     if ((state.part[record.info.id] ?? EMPTY_PARTS) !== record.parts) {
       return false
     }
@@ -2533,8 +2550,9 @@ const getReusableSessionMessageRecordsSnapshot = (
   state: State,
   sessionID: string,
   suspendPartUpdates: boolean,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot | undefined => {
-  const cached = readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates)
+  const cached = readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
   if (!cached) return undefined
   const sourceMessages = state.message[sessionID] ?? EMPTY_MESSAGES
   const session = state.session.find((candidate) => candidate.id === sessionID)
@@ -2543,6 +2561,7 @@ const getReusableSessionMessageRecordsSnapshot = (
     cached.sourceMessages === sourceMessages
     && cached.revertMessageID === revertMessageID
     && cached.suspendPartUpdates === suspendPartUpdates
+    && cached.suspendedPartUpdatesMessageID === suspendedPartUpdatesMessageID
     && snapshotPartsMatchState(cached, state)
   ) {
     return cached
@@ -2583,12 +2602,16 @@ export function buildSessionMessageRecordsSnapshot(
   sessionID: string,
   previous?: SessionMessageRecordsSnapshot,
   suspendPartUpdates = false,
+  suspendedPartUpdatesMessageID?: string,
 ): SessionMessageRecordsSnapshot {
   const { sourceMessages, visibleMessages, revertMessageID } = getVisibleMessagesForSession(state, sessionID, previous)
   const nextById = new Map<string, SessionMessageRecord>()
   const nextList = visibleMessages.map((message) => {
     const previousRecord = previous?.byId.get(message.id)
-    const parts = suspendPartUpdates && previousRecord
+    const shouldSuspendParts = suspendPartUpdates
+      && previousRecord
+      && (!suspendedPartUpdatesMessageID || message.id === suspendedPartUpdatesMessageID)
+    const parts = shouldSuspendParts
       ? previousRecord.parts
       : (state.part[message.id] ?? EMPTY_PARTS)
 
@@ -2602,6 +2625,8 @@ export function buildSessionMessageRecordsSnapshot(
 
   const unchanged = Boolean(previous)
     && previous?.visibleMessages === visibleMessages
+    && previous.suspendPartUpdates === suspendPartUpdates
+    && previous.suspendedPartUpdatesMessageID === suspendedPartUpdatesMessageID
     && previous.list.length === nextList.length
     && previous.list.every((record, index) => record === nextList[index])
 
@@ -2615,6 +2640,7 @@ export function buildSessionMessageRecordsSnapshot(
     visibleMessages,
     revertMessageID,
     suspendPartUpdates,
+    suspendedPartUpdatesMessageID,
     list: nextList,
     byId: nextById,
   }
@@ -2644,20 +2670,21 @@ export function useSessionTextMessages(sessionID: string, directory?: string): S
 }
 
 export function useUserMessageHistory(sessionID: string, directory?: string): string[] {
-  const records = useSessionMessageRecords(sessionID, directory)
-  const userMessages = useMemo(() => records.filter((record) => record.info.role === 'user'), [records])
+  const store = useDirectoryStore(directory)
+  const snapshotRef = useRef<UserMessageHistorySnapshot>(EMPTY_USER_MESSAGE_HISTORY_SNAPSHOT)
 
-  return useMemo(() => {
-    const history: string[] = []
-    for (let index = userMessages.length - 1; index >= 0; index -= 1) {
-      const message = userMessages[index]
-      const text = getFirstTextFromParts(message.parts)
-      if (text.length > 0) {
-        history.push(text)
-      }
-    }
-    return history
-  }, [userMessages])
+  const getSnapshot = useCallback(() => {
+    const next = buildUserMessageHistorySnapshot(store.getState(), sessionID, snapshotRef.current)
+    snapshotRef.current = next
+    return next.history
+  }, [sessionID, store])
+
+  const subscribe = useCallback((notify: () => void) => {
+    if (!sessionID) return () => undefined
+    return store.subscribe(notify)
+  }, [sessionID, store])
+
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 /**
@@ -2670,7 +2697,7 @@ export function useUserMessageHistory(sessionID: string, directory?: string): st
 export function useSessionMessageRecords(
   sessionID: string,
   directory?: string,
-  options?: { suspendPartUpdates?: boolean },
+  options?: { suspendPartUpdates?: boolean; suspendPartUpdatesForMessageId?: string | null },
 ) {
   const store = useDirectoryStore(directory)
   const snapshotRef = useRef<SessionMessageRecordsSnapshot>({
@@ -2679,6 +2706,7 @@ export function useSessionMessageRecords(
     visibleMessages: EMPTY_MESSAGES,
     revertMessageID: undefined,
     suspendPartUpdates: Boolean(options?.suspendPartUpdates),
+    suspendedPartUpdatesMessageID: options?.suspendPartUpdatesForMessageId ?? undefined,
     list: [],
     byId: new Map(),
   })
@@ -2690,7 +2718,14 @@ export function useSessionMessageRecords(
 
     const state = store.getState()
     const suspendPartUpdates = Boolean(options?.suspendPartUpdates)
-    const reusableSnapshot = getReusableSessionMessageRecordsSnapshot(store, state, sessionID, suspendPartUpdates)
+    const suspendedPartUpdatesMessageID = options?.suspendPartUpdatesForMessageId ?? undefined
+    const reusableSnapshot = getReusableSessionMessageRecordsSnapshot(
+      store,
+      state,
+      sessionID,
+      suspendPartUpdates,
+      suspendedPartUpdatesMessageID,
+    )
     if (reusableSnapshot) {
       snapshotRef.current = reusableSnapshot
       return reusableSnapshot.list
@@ -2698,18 +2733,19 @@ export function useSessionMessageRecords(
 
     const previousSnapshot = snapshotRef.current.sessionID === sessionID
       ? snapshotRef.current
-      : readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates)
+      : readCachedSessionMessageRecordsSnapshot(store, sessionID, suspendPartUpdates, suspendedPartUpdatesMessageID)
 
     const nextSnapshot = buildSessionMessageRecordsSnapshot(
       state,
       sessionID,
       previousSnapshot,
       suspendPartUpdates,
+      suspendedPartUpdatesMessageID,
     )
     snapshotRef.current = nextSnapshot
     rememberSessionMessageRecordsSnapshot(store, nextSnapshot)
     return nextSnapshot.list
-  }, [options?.suspendPartUpdates, sessionID, store])
+  }, [options?.suspendPartUpdates, options?.suspendPartUpdatesForMessageId, sessionID, store])
 
   const subscribe = useCallback((notify: () => void) => {
     if (!sessionID) return () => undefined
@@ -2738,6 +2774,7 @@ export function useEnsureSessionMessages(sessionID: string, directory?: string) 
   const syncDirectory = useSyncDirectory()
   const resolvedDirectory = directory ?? syncDirectory
   const store = useDirectoryStore(resolvedDirectory)
+  const requestGenerationRef = React.useRef(0)
 
   React.useEffect(() => {
     if (!sessionID) return
@@ -2752,11 +2789,14 @@ export function useEnsureSessionMessages(sessionID: string, directory?: string) 
     // Already loading this session for this directory
     if (_ensureMessagesLoading.has(loadingKey)) return
 
+    const generation = ++requestGenerationRef.current
+    const isStale = () => generation !== requestGenerationRef.current
+
     _ensureMessagesLoading.add(loadingKey)
 
     void (async () => {
       try {
-        await materializeSessionFromServer(resolvedDirectory, sessionID, store)
+        await materializeSessionFromServer(resolvedDirectory, sessionID, store, { isStale })
       } catch {
         // Transient failure — next navigation or reconnect will retry
       } finally {

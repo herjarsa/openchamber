@@ -45,6 +45,7 @@ export const useProjectSessionSelection = (args: Args): { currentSessionDirector
     hasLoadedGlobalSessions,
   } = args;
 
+
   const projectSessionMeta = React.useMemo(() => {
     const metaByProject = new Map<string, Map<string, { directory: string | null }>>();
     const firstSessionByProject = new Map<string, { id: string; directory: string | null }>();
@@ -103,6 +104,7 @@ export const useProjectSessionSelection = (args: Args): { currentSessionDirector
     if (previousActiveProjectRef.current === activeProjectId) {
       return;
     }
+
     const section = projectSections.find((item) => item.project.id === activeProjectId);
     if (!section) {
       return;
@@ -196,4 +198,5 @@ export const useProjectSessionSelection = (args: Args): { currentSessionDirector
   }, [currentSessionId, sessions, worktreeMetadata]);
 
   return { currentSessionDirectory };
+
 };
