@@ -1372,12 +1372,6 @@ showSubagentSessionsInSidebar: false,
           }
           set({ isSessionDropdownOpen: open });
         },
-setShowSubagentSessionsInSidebar: (show) => {
-          if (get().showSubagentSessionsInSidebar === show) {
-            return;
-          }
-          set({ showSubagentSessionsInSidebar: show });
-        },
 
         setShowSubagentSessionsInSidebar: (show) => {
           if (get().showSubagentSessionsInSidebar === show) {

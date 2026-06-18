@@ -40,8 +40,6 @@ export const useProjectSessionSelection = (args: Args): void => {
     openNewSessionDraft,
     setActiveMainTab,
     setSessionSwitcherOpen,
-    sessions,
-    worktreeMetadata,
     hasLoadedGlobalSessions,
   } = args;
 

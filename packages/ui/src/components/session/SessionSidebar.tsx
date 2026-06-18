@@ -532,7 +532,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     pinnedSessionIds,
     gitBranches,
     isVSCode,
+    showSubagentSessionsInSidebar: useUIStore((state) => state.showSubagentSessionsInSidebar),
   });
+
 
   const { scheduleCollapsedProjectsPersist } = useSidebarPersistence({
     isVSCode,
