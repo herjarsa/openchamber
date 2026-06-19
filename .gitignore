@@ -64,3 +64,10 @@ data/
 workspaces/
 *.pid
 .worktrees/
+
+# Generated/cache artifacts
+graphify-out/
+.omo/
+.playwright-mcp/
+.opencode/magic-context/
+
