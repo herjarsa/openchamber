@@ -397,22 +397,13 @@ export const useChatAutoFollow = ({
             return false;
         }
 
-        const savedMaxScroll = Math.max(0, saved.scrollHeight - saved.clientHeight);
-        const ratio = savedMaxScroll > 0 ? saved.scrollTop / savedMaxScroll : 0;
-        const currentMaxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-        const targetTop = Math.round(ratio * currentMaxScroll);
+        // ALWAYS go to bottom on session switch — user wants last message visible.
+        setStateValue('following');
+        lastUserReleaseAtRef.current = 0;
+        const target = Math.max(0, container.scrollHeight - container.clientHeight);
+        writeScrollTopInstant(target);
 
-        setStateValue('released');
-        writeScrollTopInstant(targetTop);
-
-        const memState = getViewportSessionMemory(sessionId);
-        updateViewportAnchor(sessionId, memState?.viewportAnchor ?? 0, {
-            scrollTop: container.scrollTop,
-            scrollHeight: container.scrollHeight,
-            clientHeight: container.clientHeight,
-        });
-
-        return true;
+        return false;
     }, [isMobile, setStateValue, startFollowLoop, startSettleBurst, updateViewportAnchor, writeScrollTopInstant]);
 
     React.useEffect(() => {
