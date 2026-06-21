@@ -124,6 +124,8 @@ export const useChatAutoFollow = ({
     const stateRef = React.useRef<AutoFollowState>('following');
     const sessionMessageCountRef = React.useRef(sessionMessageCount);
     sessionMessageCountRef.current = sessionMessageCount;
+    // Must be declared before the render-phase block below that sets it.
+    const pendingInitialRestoreRef = React.useRef<string | null>(null);
     const currentSessionIdRef = React.useRef(currentSessionId);
     // Sync refs during the render phase (before commit) so that the scroll-clamp
     // event that fires synchronously during commit sees the correct session id
@@ -144,11 +146,6 @@ export const useChatAutoFollow = ({
     const pendingSaveRef = React.useRef<{ sessionId: string; anchor: number } | null>(null);
     const settleBurstRafRef = React.useRef<number | null>(null);
     const lastUserReleaseAtRef = React.useRef(0);
-    // When restoreSnapshot is invoked while ChatViewport is still hydrating
-    // (skeleton rendered, no scroll container yet), we record the session here
-    // so a follow-up effect can replay the restore once the container mounts.
-    const pendingInitialRestoreRef = React.useRef<string | null>(null);
-
     const updateViewportAnchor = useViewportStore((s) => s.updateViewportAnchor);
 
     // Detect when the scroll container DOM element changes (mount, unmount, remount).
@@ -508,7 +505,7 @@ export const useChatAutoFollow = ({
         // user is 'near bottom' but the container is still growing. Without this guard,
         // the re-pin would re-engage the follow loop and LERP the scroll toward the
         // growing target, producing the visible 'scroll jumps down' effect.
-        isInitialHydration = pendingInitialRestoreRef.current === currentSessionIdRef.current;
+        // Re-assign for the re-pin check — same value, kept for clarity.
         if (!isInitialHydration && stateRef.current === 'released' && isNearBottom(container, isMobile) && !inGrace) {
             setStateValue('following');
             startFollowLoop();
