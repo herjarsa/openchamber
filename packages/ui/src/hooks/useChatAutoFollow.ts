@@ -143,9 +143,10 @@ export const useChatAutoFollow = ({
     const settledFramesRef = React.useRef(0);
     const lastScrollTopRef = React.useRef(0);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingSaveRef = React.useRef<{ sessionId: string; anchor: number } | null>(null);
+    const pendingSaveRef = React.useRef<{ sessionId: string; anchor: number; scrollPosition: { scrollTop: number; scrollHeight: number; clientHeight: number } } | null>(null);
     const settleBurstRafRef = React.useRef<number | null>(null);
     const lastUserReleaseAtRef = React.useRef(0);
+
     const updateViewportAnchor = useViewportStore((s) => s.updateViewportAnchor);
 
     // Detect when the scroll container DOM element changes (mount, unmount, remount).
@@ -317,7 +318,7 @@ export const useChatAutoFollow = ({
             pendingSaveRef.current = null;
             return;
         }
-        updateViewportAnchor(pending.sessionId, pending.anchor, {
+        updateViewportAnchor(pending.sessionId, pending.anchor, pending.scrollPosition ?? {
             scrollTop: container.scrollTop,
             scrollHeight: container.scrollHeight,
             clientHeight: container.clientHeight,
@@ -337,7 +338,7 @@ export const useChatAutoFollow = ({
             : 0;
         const anchor = Math.floor(anchorRatio * sessionMessageCountRef.current);
 
-        pendingSaveRef.current = { sessionId, anchor };
+        pendingSaveRef.current = { sessionId, anchor, scrollPosition: { scrollTop, scrollHeight, clientHeight } };
         if (saveTimerRef.current !== null) return;
         saveTimerRef.current = setTimeout(() => {
             saveTimerRef.current = null;
@@ -385,17 +386,14 @@ export const useChatAutoFollow = ({
         }
 
         if (!saved || isAtBottomSnapshot(saved, isMobile)) {
-            // 'following' state + follow loop (LERP) tracks the bottom as it
-            // grows from progressive content loading. No settleBurst here — it
-            // would yank scrollTop = target every rAF as scrollHeight grows,
-            // causing a visible 'scroll jumps down' effect. The follow loop's
-            // LERP is smooth and the user can always release by scrolling up
-            // (the upward-scroll check runs before the programmatic guard).
+            // Scroll to the current bottom instantly and set state to 'following'
+            // so the ResizeObserver + scrollHeight-growth path keeps re-writing
+            // scrollTop = bottom when the container grows. No LERP and no
+            // settleBurst — both produce visible 'scroll down' effects.
             setStateValue('following');
             lastUserReleaseAtRef.current = 0;
             const target = Math.max(0, container.scrollHeight - container.clientHeight);
             writeScrollTopInstant(target);
-            startFollowLoop();
             return false;
         }
 
@@ -436,8 +434,9 @@ export const useChatAutoFollow = ({
     React.useEffect(() => {
         if (sessionIsWorking && stateRef.current === 'following') {
             startFollowLoop();
+            startSettleBurst();
         }
-    }, [sessionIsWorking, startFollowLoop]);
+    }, [sessionIsWorking, startFollowLoop, startSettleBurst]);
 
     // Replay a deferred restoreSnapshot once ChatViewport mounts.
     // useLayoutEffect ensures scroll position is set before the browser paints,
@@ -505,7 +504,6 @@ export const useChatAutoFollow = ({
         // user is 'near bottom' but the container is still growing. Without this guard,
         // the re-pin would re-engage the follow loop and LERP the scroll toward the
         // growing target, producing the visible 'scroll jumps down' effect.
-        // Re-assign for the re-pin check — same value, kept for clarity.
         if (!isInitialHydration && stateRef.current === 'released' && isNearBottom(container, isMobile) && !inGrace) {
             setStateValue('following');
             startFollowLoop();
