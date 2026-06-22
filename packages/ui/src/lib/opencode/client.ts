@@ -32,6 +32,13 @@ import {
 const DEFAULT_BASE_URL = import.meta.env.VITE_OPENCODE_URL || "/api";
 const CONFIG_CACHE_TTL_MS = 10_000;
 
+// Timeout for promptAsync fetch to prevent indefinite hang when OpenCode
+// crashes mid-processing. The Promise never resolves/rejects in that case,
+// keeping session stuck as 'busy' forever. 60s covers long LLM responses
+// while still catching dead servers promptly.
+const PROMPT_ASYNC_TIMEOUT_MS = 60_000;
+
+
 /**
  * Render an SDK error payload into a short string for Error messages.
  * The SDK returns `{data, error}` shape without throwing on non-2xx; methods
@@ -831,19 +838,36 @@ class OpencodeService {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const result = await this.client.session.promptAsync({
-          sessionID: params.id,
-          ...(requestDirectory ? { directory: requestDirectory } : {}),
-          model: {
-            providerID: params.providerID,
-            modelID: params.modelID,
-          },
-          agent: params.agent,
-          variant: params.variant,
-          messageID: messageId,
-          ...(params.format ? { format: params.format } : {}),
-          parts,
-        });
+        // Race the SDK call against a timeout to prevent indefinite hang
+        // when OpenCode crashes mid-processing (fetch Promise never resolves).
+        const timeoutController = new AbortController();
+        const timeoutId = setTimeout(() => timeoutController.abort(), PROMPT_ASYNC_TIMEOUT_MS);
+        let result;
+        try {
+          result = await Promise.race([
+            this.client.session.promptAsync({
+              sessionID: params.id,
+              ...(requestDirectory ? { directory: requestDirectory } : {}),
+              model: {
+                providerID: params.providerID,
+                modelID: params.modelID,
+              },
+              agent: params.agent,
+              variant: params.variant,
+              messageID: messageId,
+              ...(params.format ? { format: params.format } : {}),
+              parts,
+            }),
+            new Promise<never>((_, reject) => {
+              timeoutController.signal.addEventListener('abort', () => {
+                reject(new Error('OpenCode prompt timed out (server may have crashed)'));
+              });
+            }),
+          ]);
+        } finally {
+          clearTimeout(timeoutId);
+          timeoutController.abort(); // cleanup listener
+        }
         if (result.response instanceof Response) {
           response = result.response;
         } else if (result.error) {

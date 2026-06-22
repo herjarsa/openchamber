@@ -1889,6 +1889,29 @@ export function SyncProvider(props: {
           connectionPhase: hasEverConnected ? "reconnecting" : "connecting",
           lastDisconnectReason: reason,
         })
+
+        // Safety net: when SSE/WS dies, any session marked 'busy' will stay
+        // stuck forever because the server can never send a status update.
+        // Reset all busy sessions to idle. On reconnect, triggerDirectoryResync
+        // restores authoritative status from the server for genuinely-busy sessions.
+        for (const store of childStores.children.values()) {
+          const state = store.getState()
+          const statuses = state.session_status
+          let hasBusy = false
+          for (const sid of Object.keys(statuses)) {
+            if (statuses[sid]?.type === 'busy') {
+              hasBusy = true
+              break
+            }
+          }
+          if (hasBusy) {
+            const reset: Record<string, SessionStatus> = {}
+            for (const [sid, status] of Object.entries(statuses)) {
+              reset[sid] = status?.type === 'busy' ? { type: 'idle' } : status
+            }
+            store.setState({ session_status: reset })
+          }
+        }
       },
       onTransportSwitch: () => {
         // Transport changes are gap-prone in real networks. Treat them like a
