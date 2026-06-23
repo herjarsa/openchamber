@@ -222,58 +222,29 @@ const lastTickScrollHeightRef = React.useRef(0);
             return;
         }
 
-const target = Math.max(0, container.scrollHeight - container.clientHeight);
-const current = container.scrollTop;
-const delta = target - current;
+        // INSTANT SNAP (OpenCode pattern from packages/ui/src/hooks/create-auto-scroll.tsx).
+        // Write scrollTop = scrollHeight directly. The browser clamps to max.
+        // No LERP, no settle counter. The loop runs every frame as long as
+        // state is 'following'. handleScrollEvent sets state='released' when
+        // the user scrolls up by more than RELEASE_DELTA_THRESHOLD (16px),
+        // which stops the loop. This handles ALL three bug scenarios:
+        //   1. Typing — anchor-induced scroll-up is < 16px, so release suppressed
+        //   2. GoToBottom — settleBurst writes within programmatic window, no false release
+        //   3. Session switch — Virtualizer remount scroll changes also small
+        //      (or caught by isInitialHydration guard in handleScrollEvent)
+        const target = container.scrollHeight;
+        markProgrammaticWrite();
+        container.scrollTop = target;
+        lastScrollTopRef.current = container.scrollTop;
 
-// If scrollHeight grew (content still loading), reset settle counter.
-// This prevents the follow loop from settling prematurely and switching
-// back to slow LERP while Virtualizer content is still being added.
-const scrollHeightChanged = container.scrollHeight !== lastTickScrollHeightRef.current;
-lastTickScrollHeightRef.current = container.scrollHeight;
-
-if (Math.abs(delta) <= SETTLE_EPSILON) {
-if (current !== target) {
-markProgrammaticWrite();
-container.scrollTop = target;
-lastScrollTopRef.current = target;
-}
-if (scrollHeightChanged) {
-settledFramesRef.current = 0;
-} else {
-settledFramesRef.current += 1;
-}
-if (settledFramesRef.current >= SETTLE_FRAMES) {
-                // Clear session-switching flag: the follow loop has confirmed
-                // scrollTop is stable at bottom. Container can become visible.
-                if (isSwitchingSessionRef.current) {
-                    isSwitchingSessionRef.current = false;
-                    setIsSwitchingSession(false);
-                }
-                snapToBottomRef.current = false;
-                // Hydration phase complete — enable normal release/re-pin checks
-                pendingInitialRestoreRef.current = null;
-                stopFollowLoop();
-                return;
-            }
-            followRafRef.current = window.requestAnimationFrame(tickFollow);
-            return;
+        // The follow loop is self-sustaining now. Clear session-switching flag
+        // so the container can become visible (if it was hidden).
+        if (isSwitchingSessionRef.current) {
+            isSwitchingSessionRef.current = false;
+            setIsSwitchingSession(false);
         }
+        snapToBottomRef.current = false;
 
-        settledFramesRef.current = 0;
-        // During session switch, snap to bottom instantly — no LERP.
-        // The Virtualizer adds content which moves the bottom target each frame;
-        // LERP(0.18) drifts behind and the user sees the backward jump.
-        if (snapToBottomRef.current) {
-            markProgrammaticWrite();
-            container.scrollTop = target;
-            lastScrollTopRef.current = target;
-        } else {
-            const next = current + delta * LERP;
-            markProgrammaticWrite();
-            container.scrollTop = next;
-            lastScrollTopRef.current = container.scrollTop;
-        }
         followRafRef.current = window.requestAnimationFrame(tickFollow);
     }, [markProgrammaticWrite, stopFollowLoop]);
 
