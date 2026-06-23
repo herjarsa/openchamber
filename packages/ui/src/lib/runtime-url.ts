@@ -33,10 +33,21 @@ const normalizeBaseUrl = (value: string | null | undefined): string => {
   return value.trim().replace(/\/+$/, '');
 };
 
+// Vite replaces `import.meta.env.VITE_OPENCODE_URL` at build time. When set
+// to an absolute URL (e.g. `http://127.0.0.1:4096`), the SDK + runtimeFetch
+// bridge both route to that origin — used by the proxy-bypass deployment where
+// the UI is served from a different host than OpenCode upstream. The runtime
+// injection (`window.__OPENCHAMBER_API_BASE_URL__`) still wins so user switches
+// and Electron/VSCode host override continue to take effect.
+const readBuildTimeApiBaseUrl = (): string => {
+  const value = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_OPENCODE_URL;
+  return typeof value === 'string' ? normalizeBaseUrl(value) : '';
+};
+
 const readInjectedApiBaseUrl = (): string => {
-  if (typeof window === 'undefined') return '';
+  if (typeof window === 'undefined') return readBuildTimeApiBaseUrl();
   const injected = (window as typeof window & { __OPENCHAMBER_API_BASE_URL__?: string }).__OPENCHAMBER_API_BASE_URL__;
-  return normalizeBaseUrl(injected);
+  return normalizeBaseUrl(injected) || readBuildTimeApiBaseUrl();
 };
 
 const currentHref = (config: RuntimeUrlConfig): string => {

@@ -131,4 +131,40 @@ describe('createRuntimeUrlResolver', () => {
       setRuntimeBearerToken(null);
     }
   });
+
+  test('falls back to VITE_OPENCODE_URL build-time env when no runtime injection', () => {
+    const previous = process.env.VITE_OPENCODE_URL;
+    try {
+      process.env.VITE_OPENCODE_URL = 'http://127.0.0.1:4096';
+      const urls = createRuntimeUrlResolver({});
+      expect(urls.api('/api/config/settings')).toBe('http://127.0.0.1:4096/api/config/settings');
+      expect(urls.health()).toBe('http://127.0.0.1:4096/health');
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VITE_OPENCODE_URL;
+      } else {
+        process.env.VITE_OPENCODE_URL = previous;
+      }
+    }
+  });
+
+  test('runtime injection overrides VITE_OPENCODE_URL build-time env', () => {
+    withWindow({
+      location: { origin: 'http://localhost:4095', href: 'http://localhost:4095/app' },
+      __OPENCHAMBER_API_BASE_URL__: 'http://remote.example:9000',
+    }, () => {
+      const previous = process.env.VITE_OPENCODE_URL;
+      try {
+        process.env.VITE_OPENCODE_URL = 'http://127.0.0.1:4096';
+        const urls = createRuntimeUrlResolver({});
+        expect(urls.api('/api/config/settings')).toBe('http://remote.example:9000/api/config/settings');
+      } finally {
+        if (previous === undefined) {
+          delete process.env.VITE_OPENCODE_URL;
+        } else {
+          process.env.VITE_OPENCODE_URL = previous;
+        }
+      }
+    });
+  });
 });
