@@ -155,7 +155,10 @@ export const useChatAutoFollow = ({
     const programmaticWriteUntilRef = React.useRef(0);
     const followRafRef = React.useRef<number | null>(null);
     const settledFramesRef = React.useRef(0);
-    const lastScrollTopRef = React.useRef(0);
+const lastScrollTopRef = React.useRef(0);
+// Track scrollHeight per tick to prevent settling while content is still loading.
+// If scrollHeight changed since last tick, reset the settle counter.
+const lastTickScrollHeightRef = React.useRef(0);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingSaveRef = React.useRef<{ sessionId: string; anchor: number; scrollPosition: { scrollTop: number; scrollHeight: number; clientHeight: number } } | null>(null);
     const settleBurstRafRef = React.useRef<number | null>(null);
@@ -219,18 +222,28 @@ export const useChatAutoFollow = ({
             return;
         }
 
-        const target = Math.max(0, container.scrollHeight - container.clientHeight);
-        const current = container.scrollTop;
-        const delta = target - current;
+const target = Math.max(0, container.scrollHeight - container.clientHeight);
+const current = container.scrollTop;
+const delta = target - current;
 
-        if (Math.abs(delta) <= SETTLE_EPSILON) {
-            if (current !== target) {
-                markProgrammaticWrite();
-                container.scrollTop = target;
-                lastScrollTopRef.current = target;
-            }
-            settledFramesRef.current += 1;
-            if (settledFramesRef.current >= SETTLE_FRAMES) {
+// If scrollHeight grew (content still loading), reset settle counter.
+// This prevents the follow loop from settling prematurely and switching
+// back to slow LERP while Virtualizer content is still being added.
+const scrollHeightChanged = container.scrollHeight !== lastTickScrollHeightRef.current;
+lastTickScrollHeightRef.current = container.scrollHeight;
+
+if (Math.abs(delta) <= SETTLE_EPSILON) {
+if (current !== target) {
+markProgrammaticWrite();
+container.scrollTop = target;
+lastScrollTopRef.current = target;
+}
+if (scrollHeightChanged) {
+settledFramesRef.current = 0;
+} else {
+settledFramesRef.current += 1;
+}
+if (settledFramesRef.current >= SETTLE_FRAMES) {
                 // Clear session-switching flag: the follow loop has confirmed
                 // scrollTop is stable at bottom. Container can become visible.
                 if (isSwitchingSessionRef.current) {
