@@ -1,8 +1,50 @@
 export type RuntimeAuthCredential =
   | { type: 'bearer'; token: string }
-  | null;
+  | { type: 'basic'; username: string; password: string }
+| null;
 
 export type RuntimeAuthCredentialProvider = () => RuntimeAuthCredential | Promise<RuntimeAuthCredential>;
+
+const BASIC_AUTH_STORAGE_KEY = 'openchamber.credentials';
+
+type StoredBasicAuth = { username?: unknown; password?: unknown };
+
+const normalizeBasicAuth = (value: { username: string; password: string } | null | undefined): { username: string; password: string } | null => {
+  if (!value) return null;
+  const username = typeof value.username === 'string' ? value.username.trim() : '';
+  const password = typeof value.password === 'string' ? value.password : '';
+  if (!username || !password) return null;
+  return { username, password };
+};
+
+const readPersistedBasicAuth = (): { username: string; password: string } | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage?.getItem(BASIC_AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredBasicAuth;
+    return normalizeBasicAuth({
+      username: typeof parsed.username === 'string' ? parsed.username : '',
+      password: typeof parsed.password === 'string' ? parsed.password : '',
+    });
+  } catch {
+    return null;
+  }
+};
+
+const writePersistedBasicAuth = (value: { username: string; password: string } | null): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (value) {
+      window.localStorage?.setItem(BASIC_AUTH_STORAGE_KEY, JSON.stringify(value));
+    } else {
+      window.localStorage?.removeItem(BASIC_AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // localStorage may be disabled (private mode, quota); the in-memory credential
+    // still works for the current session, it just won't survive a reload.
+  }
+};
 
 let credentialProvider: RuntimeAuthCredentialProvider = () => null;
 let runtimeBearerToken = '';
@@ -10,6 +52,7 @@ let runtimeUrlAuthToken = '';
 let runtimeUrlAuthTokenExpiresAt = 0;
 let runtimeUrlAuthRefreshPromise: Promise<string> | null = null;
 let runtimeAuthGeneration = 0;
+let runtimeBasicAuth: { username: string; password: string } | null = readPersistedBasicAuth();
 
 const URL_AUTH_REFRESH_SKEW_MS = 10_000;
 
@@ -55,6 +98,18 @@ const resetRuntimeAuthGeneration = (): void => {
   scheduleUrlAuthRefresh();
 };
 
+// Resolve the default credential in priority order: Bearer (explicit or
+// injected) > persisted Basic > null. The explicit provider
+// (`setRuntimeAuthCredentialProvider`) overrides this default when set.
+const resolveDefaultCredential = (): RuntimeAuthCredential => {
+  const bearer = getRuntimeBearerTokenSync();
+  if (bearer) return { type: 'bearer', token: bearer };
+  if (runtimeBasicAuth) {
+    return { type: 'basic', username: runtimeBasicAuth.username, password: runtimeBasicAuth.password };
+  }
+  return null;
+};
+
 export const setRuntimeAuthCredentialProvider = (provider: RuntimeAuthCredentialProvider): void => {
   runtimeBearerToken = '';
   resetRuntimeAuthGeneration();
@@ -71,10 +126,29 @@ export const setRuntimeBearerToken = (token: string | null | undefined): void =>
   const normalized = normalizeBearerToken(token);
   runtimeBearerToken = normalized;
   resetRuntimeAuthGeneration();
-  credentialProvider = () => normalized ? { type: 'bearer', token: normalized } : null;
+  // Re-route through the default resolver so an empty Bearer does not strand
+  // a previously-set Basic credential — the resolver consults both.
+  credentialProvider = resolveDefaultCredential;
 };
 
 export const getRuntimeBearerTokenSync = (): string => runtimeBearerToken || readInjectedBearerToken();
+
+export const setRuntimeBasicAuthCredential = (
+  credential: { username: string; password: string } | null | undefined,
+): void => {
+  runtimeBasicAuth = normalizeBasicAuth(credential ?? null);
+  writePersistedBasicAuth(runtimeBasicAuth);
+  resetRuntimeAuthGeneration();
+  // Re-route through the default resolver so the next request picks the new
+  // credential without depending on the caller's explicit Bearer state.
+  credentialProvider = resolveDefaultCredential;
+};
+
+export const getRuntimeBasicAuthCredentialSync = (): { username: string; password: string } | null => runtimeBasicAuth;
+
+export const clearRuntimeBasicAuthCredential = (): void => {
+  setRuntimeBasicAuthCredential(null);
+};
 
 export const setRuntimeUrlAuthToken = (token: string | null | undefined, expiresAt: number | null | undefined): void => {
   const normalized = normalizeBearerToken(token);
@@ -111,10 +185,16 @@ export const getRuntimeUrlAuthTokenSync = (): string => {
 
 export const getRuntimeAuthCredential = async (): Promise<RuntimeAuthCredential> => {
   const credential = await credentialProvider();
-  const token = credential?.type === 'bearer'
-    ? normalizeBearerToken(credential.token)
-    : getRuntimeBearerTokenSync();
-  return token ? { type: 'bearer', token } : null;
+  if (!credential) return null;
+  if (credential.type === 'bearer') {
+    const token = normalizeBearerToken(credential.token);
+    return token ? { type: 'bearer', token } : null;
+  }
+  if (credential.type === 'basic') {
+    const normalized = normalizeBasicAuth(credential);
+    return normalized ? { type: 'basic', username: normalized.username, password: normalized.password } : null;
+  }
+  return null;
 };
 
 // Performs the actual network mint and swaps the new token in atomically (the
@@ -129,6 +209,8 @@ const mintRuntimeUrlAuthToken = (apiBaseUrl?: string | null): Promise<string> =>
     const headers = new Headers();
     if (credential?.type === 'bearer') {
       headers.set('Authorization', `Bearer ${credential.token}`);
+    } else if (credential?.type === 'basic') {
+      headers.set('Authorization', `Basic ${btoa(`${credential.username}:${credential.password}`)}`);
     }
     const response = await fetch(buildAuthUrl(apiBaseUrl, '/auth/url-token'), {
       method: 'POST',
@@ -264,6 +346,8 @@ export const buildRuntimeAuthHeaders = async (headers?: HeadersInit): Promise<He
   const credential = await getRuntimeAuthCredential();
   if (credential?.type === 'bearer') {
     next.set('Authorization', `Bearer ${credential.token}`);
+  } else if (credential?.type === 'basic') {
+    next.set('Authorization', `Basic ${btoa(`${credential.username}:${credential.password}`)}`);
   }
   return next;
 };
