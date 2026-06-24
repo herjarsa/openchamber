@@ -272,6 +272,7 @@ export const runtimeFetch = async (input: string | URL | Request, init: RuntimeF
     r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/commands(\/|\?|$)/, '$1/api/command$2');
     r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/agents(\/|\?|$)/, '$1/api/agent$2');
     r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/providers(\/|\?|$)/, '$1/api/config/providers$2');
+      r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/mcp(\/|\?|$)/, '$1/mcp$2');
     if (r === raw) return rewrittenInput;
     if (typeof rewrittenInput === 'string') return r;
     if (rewrittenInput instanceof URL) return new URL(r);
@@ -311,6 +312,41 @@ export const runtimeFetch = async (input: string | URL | Request, init: RuntimeF
   return pending.then((res) => res.clone());
 };
 
+// Phase C: Response shape transformers.
+// Server 1.17.9 wraps list endpoints in {location, data: T[]} but the SDK
+// expects flat T[]. Unwrap the wrapper for known endpoints so the SDK
+// receives the shape it expects without consumer changes.
+const SDK_SHAPE_UNWRAP_PATTERNS: ReadonlyArray<RegExp> = [
+  /\/api\/agent(?:\/|\?|$)/,
+  /\/api\/command(?:\/|\?|$)/,
+  /\/api\/skill(?:\/|\?|$)/,
+  /\/api\/provider(?:\/|\?|$)/,
+];
+
+const shouldUnwrapSdkData = (url: string): boolean =>
+  SDK_SHAPE_UNWRAP_PATTERNS.some((p) => p.test(url));
+
+const unwrapSdkDataResponse = async (response: Response, url: string): Promise<Response> => {
+  if (!shouldUnwrapSdkData(url)) return response;
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('json')) return response;
+  try {
+    const text = await response.clone().text();
+    const body = JSON.parse(text);
+    if (body && typeof body === 'object' && 'data' in body && !Array.isArray(body)) {
+      const unwrapped = JSON.stringify(body.data);
+      return new Response(unwrapped, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
+    return response;
+  } catch {
+    return response;
+  }
+};
+
 let runtimeFetchBridgeInstalled = false;
 
 // Cross-origin fetches (e.g. the SDK talking to an external OpenCode upstream
@@ -340,6 +376,15 @@ export const installRuntimeFetchBridge = (): void => {
   runtimeFetchBridgeInstalled = true;
 
   const nativeFetch = window.fetch.bind(window);
+const _wrappedNativeFetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const result = nativeFetch(input, init);
+  const url = typeof input === 'string'
+    ? input
+    : input instanceof URL
+      ? input.toString()
+      : input.url;
+  return result.then((r) => unwrapSdkDataResponse(r, url));
+};
   const mergedInit = (input: RequestInfo | URL, init?: RequestInit, targetOverride?: string) => {
     const target = targetOverride ?? (typeof input === 'string' || input instanceof URL ? input.toString() : input.url);
     return { ...init, credentials: resolveFetchCredentials(target, init) };
@@ -353,7 +398,7 @@ export const installRuntimeFetchBridge = (): void => {
     // shouldResolveFetchInput gate). We send Authorization header explicitly,
     // so we never need cookies / credentials mode cross-origin.
     if (typeof window === 'undefined') {
-      return nativeFetch(input, init);
+      return _wrappedNativeFetch(input, init);
     }
     const resolveTargetOrigin = (): string => {
       try {
@@ -379,6 +424,7 @@ export const installRuntimeFetchBridge = (): void => {
       r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/commands(\/|\?|$)/, '$1/api/command$2');
       r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/agents(\/|\?|$)/, '$1/api/agent$2');
       r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/providers(\/|\?|$)/, '$1/api/config/providers$2');
+      r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/mcp(\/|\?|$)/, '$1/mcp$2');
       return r;
     };
     if (typeof input === 'string') {
@@ -397,16 +443,16 @@ export const installRuntimeFetchBridge = (): void => {
           const url = new URL(input);
           if (isActiveRuntimeServiceUrl(url)) {
             const headers = await mergeHeaders(undefined, init?.headers);
-            return nativeFetch(input, { ...mergedInit(input, init), headers });
+            return _wrappedNativeFetch(input, { ...mergedInit(input, init), headers });
           }
         } catch {
           // Non-URL fetch inputs should fall through unchanged.
         }
-        return nativeFetch(input, safeInit);
+        return _wrappedNativeFetch(input, safeInit);
       }
       const target = buildRuntimeFetchUrl(input);
       const headers = await mergeHeaders(undefined, init?.headers);
-      return nativeFetch(target, { ...mergedInit(input, init, target), headers });
+      return _wrappedNativeFetch(target, { ...mergedInit(input, init, target), headers });
     }
 
     if (input instanceof URL) {
@@ -414,13 +460,13 @@ export const installRuntimeFetchBridge = (): void => {
       if (!shouldResolveFetchInput(raw)) {
         if (isActiveRuntimeServiceUrl(input)) {
           const headers = await mergeHeaders(undefined, init?.headers);
-          return nativeFetch(input, { ...mergedInit(input, init), headers });
+          return _wrappedNativeFetch(input, { ...mergedInit(input, init), headers });
         }
-        return nativeFetch(input, safeInit);
+        return _wrappedNativeFetch(input, safeInit);
       }
       const target = buildRuntimeFetchUrl(raw);
       const headers = await mergeHeaders(undefined, init?.headers);
-      return nativeFetch(target, { ...mergedInit(input, init, target), headers });
+      return _wrappedNativeFetch(target, { ...mergedInit(input, init, target), headers });
     }
 
     if (input instanceof Request) {
@@ -429,19 +475,19 @@ export const installRuntimeFetchBridge = (): void => {
           const url = new URL(input.url);
           if (isActiveRuntimeServiceUrl(url)) {
             const headers = await mergeHeaders(input.headers, init?.headers);
-            return nativeFetch(new Request(input, { ...mergedInit(input, init), headers }));
+            return _wrappedNativeFetch(new Request(input, { ...mergedInit(input, init), headers }));
           }
         } catch {
           // Non-URL request inputs should fall through unchanged.
         }
-        return nativeFetch(input, safeInit);
+        return _wrappedNativeFetch(input, safeInit);
       }
       const headers = await mergeHeaders(input.headers, init?.headers);
       const target = buildRuntimeFetchUrl(input.url);
       const request = target === input.url ? input : new Request(target, input);
-      return nativeFetch(new Request(request, { ...mergedInit(input, init, target), headers }));
+      return _wrappedNativeFetch(new Request(request, { ...mergedInit(input, init, target), headers }));
     }
 
-    return nativeFetch(input, safeInit);
+    return _wrappedNativeFetch(input, safeInit);
   };
 };
