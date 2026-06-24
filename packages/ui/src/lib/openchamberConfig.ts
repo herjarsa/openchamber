@@ -117,18 +117,12 @@ const getLegacyConfigPath = (projectDirectory: string): string => {
   return joinPath(joinPath(projectDirectory, LEGACY_CONFIG_DIR), CONFIG_FILENAME);
 };
 
-// getBaseUrl returns the OpenChamber Express origin (page origin) — NOT the
-// OpenCode upstream. All callers in this file use it for /fs/* endpoints
-// which are served by OpenChamber Express on the page origin, not by the
-// OpenCode upstream on :4096. Using VITE_OPENCODE_URL here caused
-// `//fs/list` to hit :4096 (HTML SPA fallback) instead of :9090/api/fs/list
-// (real JSON directory listing).
-const getBaseUrl = (): string => {
-  if (typeof window !== 'undefined') {
-    return window.location.origin;
-  }
-  return '';
-};
+// getBaseUrl returns '/api' — the relative prefix where OpenChamber Express
+// serves /fs/* endpoints. NOT the OpenCode upstream URL. Using
+// VITE_OPENCODE_URL or window.location.origin here caused the /fs/* calls
+// to hit the wrong server (OpenCode :4096 or page origin without /api
+// prefix), resulting in HTML SPA fallback instead of JSON.
+const getBaseUrl = (): string => '/api';
 
 const postJson = async <T>(url: string, body: unknown): Promise<{ ok: boolean; data: T | null }> => {
   try {
