@@ -6,11 +6,13 @@ type ExecResult = { success: boolean; results: CommandExecResult[] };
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_OPENCODE_URL || '/api';
 
+// Returns the OpenChamber Express origin (page origin) — NOT the OpenCode
+// upstream. /fs/exec is served by OpenChamber Express, not OpenCode.
 const getBaseUrl = (): string => {
-  if (typeof DEFAULT_BASE_URL === 'string' && DEFAULT_BASE_URL.startsWith('/')) {
-    return DEFAULT_BASE_URL;
+  if (typeof window !== 'undefined') {
+    return window.location.origin;
   }
-  return DEFAULT_BASE_URL;
+  return '';
 };
 
 function getRuntimeFilesAPI(): FilesAPI | null {
