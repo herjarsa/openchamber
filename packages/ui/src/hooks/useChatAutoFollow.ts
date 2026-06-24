@@ -192,30 +192,18 @@ export const useChatAutoFollow = ({
             return;
         }
 
-        const target = Math.max(0, container.scrollHeight - container.clientHeight);
-        const current = container.scrollTop;
-        const delta = target - current;
-
-        if (Math.abs(delta) <= SETTLE_EPSILON) {
-            if (current !== target) {
-                markProgrammaticWrite();
-                container.scrollTop = target;
-                lastScrollTopRef.current = target;
-            }
-            settledFramesRef.current += 1;
-            if (settledFramesRef.current >= SETTLE_FRAMES) {
-                stopFollowLoop();
-                return;
-            }
-            followRafRef.current = window.requestAnimationFrame(tickFollow);
-            return;
-        }
-
-        settledFramesRef.current = 0;
-        const next = current + delta * LERP;
+        // INSTANT SNAP (OpenCode pattern). Write scrollTop = scrollHeight directly.
+        // No LERP, no settle counter. The loop runs every frame as long as
+        // state is 'following'. handleScrollEvent sets state='released' when
+        // the user scrolls up by more than RELEASE_DELTA_THRESHOLD (16px).
+        // This eliminates visible "catch-up" animation while Virtualizer content
+        // is still settling, AND prevents LERP drift from leaving the scroll
+        // position above the bottom during session-switch Virtualizer remounts.
+        const target = container.scrollHeight;
         markProgrammaticWrite();
-        container.scrollTop = next;
+        container.scrollTop = target;
         lastScrollTopRef.current = container.scrollTop;
+        settledFramesRef.current = 0;
         followRafRef.current = window.requestAnimationFrame(tickFollow);
     }, [markProgrammaticWrite, stopFollowLoop]);
 
