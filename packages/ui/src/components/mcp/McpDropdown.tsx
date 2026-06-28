@@ -103,7 +103,7 @@ export const McpDropdownContent = React.memo<McpDropdownContentProps>(function M
   React.useEffect(() => {
     if (!active) return;
     void refresh({ directory, silent: true });
-    void loadMcpConfigs({ force: true, timeoutMs: 3_000 });
+    void loadMcpConfigs({ force: true });
   }, [active, refresh, directory, loadMcpConfigs]);
 
   // Cap the visible server list to prevent rendering thousands of Tooltip+Switch
@@ -335,7 +335,7 @@ export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass 
   React.useEffect(() => {
     if (!open) return;
     void refresh({ directory, silent: true });
-    void loadMcpConfigs({ force: true, timeoutMs: 3_000 });
+    void loadMcpConfigs({ force: true });
   }, [open, refresh, directory, loadMcpConfigs]);
 
   const health = React.useMemo(() => computeMcpHealth(status), [status]);
