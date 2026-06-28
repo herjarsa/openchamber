@@ -736,7 +736,6 @@ export const registerCommonRequestMiddleware = (app, dependencies) => {
       req.path.startsWith('/api/openchamber/tunnel')
     ) {
       express.json({ limit: '50mb' })(req, res, next);
-      express.json({ limit: '50mb' })(req, res, next);
     } else {
       express.json({ limit: '50mb' })(req, res, next);
     }

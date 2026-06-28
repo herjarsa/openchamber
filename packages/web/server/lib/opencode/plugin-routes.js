@@ -167,9 +167,7 @@ export const registerPluginRoutes = (app, dependencies) => {
         name: entry.spec ?? entry.id ?? 'Unknown Plugin',
         shortName: (entry.spec ?? entry.id ?? 'unknown').split('/').pop() ?? 'unknown',
         status: 'ok',
-        command: entry.kind === 'npm'
-          ? `opencode add ${entry.spec}`
-          : `opencode add ${entry.spec}`,
+        command: `opencode add ${entry.spec}`,
         version: readInstalledVersion(entry.spec),
       }));
       res.json({ status: statusItems });
