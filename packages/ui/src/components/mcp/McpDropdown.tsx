@@ -132,7 +132,7 @@ export const McpDropdownContent = React.memo<McpDropdownContentProps>(function M
     // fill remaining slots from status keys up to MAX_VISIBLE_SERVERS.
     // This prevents 28K+ numeric status entries drowning out real servers.
     if (sorted.length <= MAX_VISIBLE_SERVERS) {
-      return { visibleNames: sorted, totalCount: sorted.length };
+      return { visibleNames: sorted, totalCount: sorted.length, filteredCount: 0 };
     }
 
     const prioritized = new Set<string>();
