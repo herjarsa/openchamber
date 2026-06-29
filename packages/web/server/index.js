@@ -1340,20 +1340,27 @@ async function main(options = {}) {
 // Express handlers and must not be forwarded to the OpenCode upstream.
 // We return without calling next() because in Express 5 the route handler
 // is already running concurrently and will send the response.
-// NOTE: /api/config/ is NOT fully excluded — only specific sub-paths have
-// OpenChamber Express handlers (skills, themes, plugins, mcp, snippets).
-// List endpoints (/api/config/providers, /api/config/agents) are proxied
-// to the OpenCode upstream which owns the canonical list data.
+// IMPORTANT: Only list paths that have ACTUAL Express handlers. Anything
+// in this list without a matching Express route will hang for 15s before the
+// proxy timeout. Paths owned by OpenCode (agent/command/skill/tool/mcp/
+// provider/path/session/etc.) MUST NOT be here — they are proxied through.
 const INTERNAL_API_PREFIXES = [
-'/api/fs/', '/api/git/', '/api/settings', '/api/config/skills',
-'/api/config/themes', '/api/config/plugins', '/api/config/mcp',
-'/api/config/snippets', '/api/config/opencode-resolution',
+// Filesystem + git (full prefixes — every sub-path is OpenChamber)
+'/api/fs/', '/api/git/',
+// OpenChamber config handlers (NOT OpenCode list endpoints)
+'/api/config/skills', '/api/config/themes', '/api/config/plugins',
+'/api/config/mcp', '/api/config/mcp/', '/api/config/snippets',
+'/api/config/opencode-resolution', '/api/config/settings',
+'/api/config/reload',
+// OpenChamber-managed resources (NOT OpenCode SDK endpoints)
+'/api/auth/', '/api/passkeys', '/api/session-folders',
+'/api/magic-prompts', '/api/mcp/auth',
 '/api/notifications/', '/api/tts/', '/api/version',
-'/api/system/', '/api/mcp/auth', '/api/plugins/',
-'/api/sessions/', '/api/prompt/', '/api/project/',
-'/api/session-folders', '/api/auth/', '/api/passkeys',
-'/api/magic-prompts', '/api/global/event', '/api/experimental/',
-'/api/openchamber/', '/api/opencode/upgrade-status', '/api/push/',
+'/api/system/', '/api/sessions/', '/api/projects/', '/api/push/',
+'/api/terminal/', '/api/text/', '/api/voice/', '/api/zen/',
+'/api/session-activity/', '/api/preview/', '/api/quota/',
+'/api/github/', '/api/behavior/', '/api/client-auth/',
+'/api/openchamber/', '/api/opencode/', '/api/global/event',
 ];
 if (INTERNAL_API_PREFIXES.some(p => req.originalUrl.startsWith(p))) {
 return;
