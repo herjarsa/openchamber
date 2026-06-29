@@ -259,22 +259,7 @@ export const runtimeFetch = async (input: string | URL | Request, init: RuntimeF
         ? rewrittenInput.toString()
         : rewrittenInput.url;
     let r = raw;
-// OpenCode 1.17.10 server uses SINGULAR endpoint names without the /api/ prefix.
-// The SDK calls with /api/ + PLURAL (e.g. /api/skills, /api/agents, /api/commands).
-// Rewrite SDK paths to the server's actual paths so calls return JSON, not SPA HTML.
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/config\/skills(\/|\?|$)/, '$1/skill$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/skills(\/|\?|$)/, '$1/skill$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/commands(\/|\?|$)/, '$1/command$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/agents(\/|\?|$)/, '$1/agent$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/providers(\/|\?|$)/, '$1/provider$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/projects(\/|\?|$)/, '$1/project$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/sessions(\/|\?|$)/, '$1/session$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/lsps(\/|\?|$)/, '$1/lsp$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/mcp(\/|\?|$)/, '$1/mcp$2');
-if (r === raw) return rewrittenInput;
-if (typeof rewrittenInput === 'string') return r;
-if (rewrittenInput instanceof URL) return new URL(r);
-    return new Request(r, rewrittenInput);
+    return rewrittenInput;
 })();
   const resolvedInput = resolveRuntimeFetchInput(sdkRewrittenInput, query);
   const inputHeaders = resolvedInput instanceof Request ? resolvedInput.headers : undefined;
@@ -438,17 +423,8 @@ const _wrappedNativeFetch = (input: RequestInfo | URL, init?: RequestInit): Prom
                 || pathPart.startsWith('/mini-chat/'))) {
           pathPart = '/api' + pathPart;
         }
-        r = window.location.origin + pathPart;
+      r = window.location.origin + pathPart;
       }
-      r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/config\/skills(\/|\?|$)/, '$1/skill$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/skills(\/|\?|$)/, '$1/skill$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/commands(\/|\?|$)/, '$1/command$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/agents(\/|\?|$)/, '$1/agent$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/providers(\/|\?|$)/, '$1/provider$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/projects(\/|\?|$)/, '$1/project$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/sessions(\/|\?|$)/, '$1/session$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/lsps(\/|\?|$)/, '$1/lsp$2');
-r = r.replace(/^((?:https?:)?\/\/[^/]+)\/api\/mcp(\/|\?|$)/, '$1/mcp$2');
       return r;
     };
     if (typeof input === 'string') {
