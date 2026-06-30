@@ -144,6 +144,7 @@ export const dict: Record<I18nKey, string> = {
   'layout.rightSidebar.context': 'コンテキスト',
   'layout.services.instance': 'インスタンス',
   'layout.services.usage': '使用量',
+  'layout.services.pluginStatus': 'プラグインステータス',
   'sessions.sidebar.header.actions.closeSessions': 'セッションを閉じる',
   'sessions.sidebar.header.actions.addProject': 'プロジェクトを追加',
   'sessions.sidebar.header.actions.newSession': '新しいセッション',

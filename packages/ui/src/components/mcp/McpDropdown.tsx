@@ -22,6 +22,21 @@ import { McpIcon } from '@/components/icons/McpIcon';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
 
+/**
+ * DeferredMount delays rendering children by `delayMs` milliseconds.
+ * This decouples the tab switch animation from heavy component mounts,
+ * ensuring the user sees the tab switch UI before the expensive render blocks.
+ */
+export function DeferredMount({ children, delayMs = 200 }: { children: React.ReactNode; delayMs?: number }) {
+  const [ready, setReady] = React.useState(false);
+  React.useEffect(() => {
+    const id = setTimeout(() => setReady(true), delayMs);
+    return () => clearTimeout(id);
+  }, [delayMs]);
+  if (!ready) return null;
+  return <>{children}</>;
+}
+
 const statusTooltip = (
   status: McpStatus | undefined,
   t: (key: 'mcpDropdown.status.unknown' | 'mcpDropdown.status.connected' | 'mcpDropdown.status.failed' | 'mcpDropdown.status.unknownError' | 'mcpDropdown.status.needsAuth' | 'mcpDropdown.status.needsRegistration', params?: { error?: string }) => string
