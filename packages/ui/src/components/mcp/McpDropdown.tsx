@@ -78,6 +78,7 @@ export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, 
   const disconnect = useMcpStore((state) => state.disconnect);
   const mcpServers = useMcpConfigStore((state) => state.mcpServers);
   const loadMcpConfigs = useMcpConfigStore((state) => state.loadMcpConfigs);
+const configByName = React.useMemo(() => new Map(mcpServers.map((s) => [s.name, s])), [mcpServers]);
   const [isSpinning, setIsSpinning] = React.useState(false);
   const [busyName, setBusyName] = React.useState<string | null>(null);
 
@@ -147,8 +148,9 @@ export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, 
       <div className={cn('max-h-64 overflow-y-auto py-2', mobileListDensity && 'space-y-1 py-3', listClassName)}>
         {sortedNames.map((serverName) => {
           const serverStatus = status[serverName];
+          const configEntry = configByName.get(serverName);
           const tone = statusTone(serverStatus);
-          const isConnected = serverStatus?.status === 'connected';
+          const isConnected = configEntry ? configEntry.enabled : serverStatus?.status === 'connected';
           const isBusy = busyName === serverName;
           const tooltip = statusTooltip(serverStatus, t);
 
@@ -232,6 +234,7 @@ export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass 
   const disconnect = useMcpStore((state) => state.disconnect);
   const mcpServers = useMcpConfigStore((state) => state.mcpServers);
   const loadMcpConfigs = useMcpConfigStore((state) => state.loadMcpConfigs);
+const configByName = React.useMemo(() => new Map(mcpServers.map((s) => [s.name, s])), [mcpServers]);
 
   const handleDropdownOpenChange = React.useCallback((isOpen: boolean) => {
     if (!isOpen) {
@@ -294,8 +297,9 @@ export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass 
     <>
       {sortedNames.map((serverName) => {
         const serverStatus = status[serverName];
+        const configEntry = configByName.get(serverName);
         const tone = statusTone(serverStatus);
-        const isConnected = serverStatus?.status === 'connected';
+        const isConnected = configEntry ? configEntry.enabled : serverStatus?.status === 'connected';
         const isBusy = busyName === serverName;
         const tooltip = statusTooltip(serverStatus, t);
 
