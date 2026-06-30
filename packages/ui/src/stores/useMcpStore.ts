@@ -127,7 +127,7 @@ export const useMcpStore = create<McpStore>()(
         : undefined;
 
       try {
-        const api = getMcpApiClient(directory);
+        const api = getMcpApiClient(null); // Use global client to get ALL MCPs
         const result = await api.mcp.status(
           undefined,
           controller ? { signal: controller.signal } : undefined,

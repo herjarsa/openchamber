@@ -493,7 +493,7 @@ const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
             ) : null}
 
             <div className="py-2">
-              {rateLimitGroups.map((group, index) => {
+              {rateLimitGroups.filter(Boolean).map((group, index) => {
                 const providerExpandedFamilies = expandedFamilies[group.providerId] ?? [];
                 return (
                   <React.Fragment key={group.providerId}>
@@ -1036,10 +1036,10 @@ export const Header: React.FC<HeaderProps> = ({
       if (!dropdownProviderIds.includes(provider.id)) {
         continue;
       }
-      const result = quotaResults.find((entry) => entry.providerId === provider.id);
-      const windows = (result?.usage?.windows ?? {}) as Record<string, UsageWindow>;
+      const result = quotaResults.find((entry) => entry != null && entry.providerId === provider.id);
+      const usageWindows = (result?.usage?.windows ?? {}) as Record<string, UsageWindow>;
       const models = result?.usage?.models;
-      const entries = Object.entries(windows);
+      const entries = Object.entries(usageWindows);
 
       const group: RateLimitGroup = {
         providerId: provider.id,
@@ -2502,8 +2502,9 @@ export const Header: React.FC<HeaderProps> = ({
                       )}
 
                       {/* Mobile provider groups */}
+                      {/* Mobile provider groups */}
                       <div className="py-1">
-                        {rateLimitGroups.map((group, index) => (
+                        {rateLimitGroups.filter(Boolean).map((group, index) => (
                           <React.Fragment key={group.providerId}>
                             {index > 0 ? (
                               <div className="mx-4 my-1 border-t border-[var(--interactive-border)]" />

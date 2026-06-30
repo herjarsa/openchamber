@@ -22,6 +22,7 @@ import { McpIcon } from '@/components/icons/McpIcon';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
 
+
 /**
  * DeferredMount delays rendering children by `delayMs` milliseconds.
  * This decouples the tab switch animation from heavy component mounts,
@@ -83,7 +84,9 @@ interface McpDropdownContentProps {
   mobileListDensity?: boolean;
 }
 
-export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, className, headerAction, listClassName, hideHeader = false, mobileListDensity = false }) => {
+export const McpDropdownContent = React.memo<McpDropdownContentProps>(function McpDropdownContent({ active, className, headerAction, listClassName, hideHeader = false, mobileListDensity = false }) {
+  'use no memo'; // React Compiler: skip automatic memoization for this hot component
+
   const { t } = useI18n();
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
   const directory = currentDirectory ?? null;
@@ -94,53 +97,77 @@ export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, 
   const mcpServers = useMcpConfigStore((state) => state.mcpServers);
   const loadMcpConfigs = useMcpConfigStore((state) => state.loadMcpConfigs);
   const updateMcp = useMcpConfigStore((state) => state.updateMcp);
-const configByName = React.useMemo(() => new Map(mcpServers.map((s) => [s.name, s])), [mcpServers]);
   const [isSpinning, setIsSpinning] = React.useState(false);
   const [busyName, setBusyName] = React.useState<string | null>(null);
 
-  React.useEffect(() => {
-    void refresh({ directory, silent: true });
-  }, [refresh, directory]);
-
-  React.useEffect(() => {
-    void loadMcpConfigs({ force: true });
-  }, [loadMcpConfigs]);
-
+  // Only refresh on first active render
   React.useEffect(() => {
     if (!active) return;
-    void Promise.all([
-      refresh({ directory, silent: true }),
-      loadMcpConfigs({ force: true }),
-    ]);
+    void refresh({ directory, silent: true });
+    void loadMcpConfigs({ force: true, timeoutMs: 3_000 });
   }, [active, refresh, directory, loadMcpConfigs]);
 
-React.useEffect(() => {
-    if (!active) return;
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void refresh({ directory, silent: true });
-      }
-    };
-    const handleFocus = () => {
-      void refresh({ directory, silent: true });
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    window.addEventListener('focus', handleFocus);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [active, refresh, directory]);
-
-  const sortedNames = React.useMemo(() => {
-    const names = new Set<string>(Object.keys(status));
+  // Cap the visible server list to prevent rendering thousands of Tooltip+Switch
+  // components when the status map contains excessive entries (which causes
+  // browser freeze from 200k+ DOM nodes). Show a truncated indicator.
+  const MAX_VISIBLE_SERVERS = 100;
+  const { visibleNames, totalCount, filteredCount } = React.useMemo(() => {
+    // Collect all unique server names from both sources
+    const allNames = new Set<string>();
     for (const server of mcpServers) {
-      if (server?.name) {
-        names.add(server.name);
+      if (server?.name) allNames.add(server.name);
+    }
+    for (const key of Object.keys(status)) {
+      allNames.add(key);
+    }
+
+    const sorted = Array.from(allNames).sort((a, b) => a.localeCompare(b));
+
+    // Collect config server names (real configured MCP servers)
+    const configNames = new Set<string>();
+    for (const server of mcpServers) {
+      if (server?.name) configNames.add(server.name);
+    }
+
+    // Prioritize: config servers (real) always included;
+    // fill remaining slots from status keys up to MAX_VISIBLE_SERVERS.
+    // This prevents 28K+ numeric status entries drowning out real servers.
+    if (sorted.length <= MAX_VISIBLE_SERVERS) {
+      return { visibleNames: sorted, totalCount: sorted.length };
+    }
+
+    const prioritized = new Set<string>();
+    // 1. All config server names first (real MCP servers)
+    for (const name of sorted) {
+      if (configNames.has(name)) {
+        prioritized.add(name);
       }
     }
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
+    // 2. Fill remaining slots from sorted status keys, skipping purely numeric
+    //    names that are noise (OpenCode internal entries, not real MCP servers).
+    for (const name of sorted) {
+      if (prioritized.size >= MAX_VISIBLE_SERVERS) break;
+      if (prioritized.has(name)) continue;
+      // Skip names that are purely numeric (noise from OpenCode status map)
+      if (/^\d+$/.test(name)) continue;
+      prioritized.add(name);
+    }
+
+    return {
+      visibleNames: Array.from(prioritized),
+      totalCount: sorted.length,
+      filteredCount: sorted.length - Array.from(prioritized).length,
+    };
   }, [mcpServers, status]);
+
+  // Config lookup: server name → config entry (for enabled/disabled fallback)
+  const configByName = React.useMemo(() => {
+    const map = new Map<string, { name: string; enabled: boolean }>();
+    for (const server of mcpServers) {
+      if (server?.name) map.set(server.name, { name: server.name, enabled: server.enabled });
+    }
+    return map;
+  }, [mcpServers]);
 
   const handleRefresh = React.useCallback((e?: React.MouseEvent) => {
     e?.preventDefault();
@@ -151,7 +178,6 @@ React.useEffect(() => {
       setIsSpinning(false);
     });
   }, [isSpinning, refresh, directory]);
-
   return (
     <div className={cn('w-full', className)}>
       {!hideHeader ? <div className="border-b border-[var(--interactive-border)]">
@@ -180,13 +206,17 @@ React.useEffect(() => {
       </div> : null}
 
       <div className={cn('max-h-64 overflow-y-auto py-2', mobileListDensity && 'space-y-1 py-3', listClassName)}>
-        {sortedNames.map((serverName) => {
+        {visibleNames.map((serverName) => {
           const serverStatus = status[serverName];
           const configEntry = configByName.get(serverName);
           const tone = configEntry ? (configEntry.enabled ? 'success' : 'default') : statusTone(serverStatus);
           const isConnected = configEntry ? configEntry.enabled : serverStatus?.status === 'connected';
           const isBusy = busyName === serverName;
-          const tooltip = statusTooltip(serverStatus, t);
+          const tooltip = serverStatus
+            ? statusTooltip(serverStatus, t)
+            : configEntry?.enabled
+              ? t('mcpDropdown.status.configured')
+              : t('mcpDropdown.status.notConnected');
 
           return (
             <div
@@ -251,15 +281,21 @@ React.useEffect(() => {
           );
         })}
 
-        {sortedNames.length === 0 && (
+        {visibleNames.length === 0 && (
           <div className="px-4 py-5 typography-ui-label text-muted-foreground text-center">
             {t('mcpDropdown.empty.configureInConfig')}
+          </div>
+        )}
+
+        {(filteredCount ?? 0) > 0 && (
+          <div className="px-4 py-2 typography-caption text-muted-foreground text-center border-t border-border/50">
+            Showing {visibleNames.length} of {totalCount} servers
           </div>
         )}
       </div>
     </div>
   );
-};
+});
 
 export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass }) => {
   const { t } = useI18n();
@@ -298,19 +334,18 @@ export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass 
 
   const [busyName, setBusyName] = React.useState<string | null>(null);
 
-  // Fetch on mount and when directory changes
+  // Load data on mount (cached) so header icon shows status immediately.
+  // Dropdown re-fetch happens separately in McpDropdownContent.
   React.useEffect(() => {
     void refresh({ directory, silent: true });
-    void loadMcpConfigs({ force: true });
+    void loadMcpConfigs();
   }, [refresh, directory, loadMcpConfigs]);
 
-  // Refresh when dropdown opens
+  // Refresh when dropdown opens (force = bypass in-flight dedup)
   React.useEffect(() => {
     if (!open) return;
-    void Promise.all([
-      refresh({ directory, silent: true }),
-      loadMcpConfigs({ force: true }),
-    ]);
+    void refresh({ directory, silent: true });
+    void loadMcpConfigs({ force: true, timeoutMs: 3_000 });
   }, [open, refresh, directory, loadMcpConfigs]);
 
   const health = React.useMemo(() => computeMcpHealth(status), [status]);
@@ -329,7 +364,6 @@ export const McpDropdown: React.FC<McpDropdownProps> = ({ headerIconButtonClass 
     e?.preventDefault();
     if (isSpinning) return;
     setIsSpinning(true);
-
     const minSpinPromise = new Promise(resolve => setTimeout(resolve, 500));
     Promise.all([refresh({ directory }), minSpinPromise]).finally(() => {
       setIsSpinning(false);
