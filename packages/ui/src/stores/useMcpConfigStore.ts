@@ -135,9 +135,11 @@ interface McpConfigStore {
   selectedMcpName: string | null;
   isLoading: boolean;
   mcpDraft: McpDraft | null;
+  currentDirectory: string | null;
 
   setSelectedMcp: (name: string | null) => void;
   setMcpDraft: (draft: McpDraft | null) => void;
+  setCurrentDirectory: (dir: string | null) => void;
   loadMcpConfigs: (options?: { force?: boolean; directory?: string | null }) => Promise<boolean>;
   createMcp: (config: McpDraft, directory?: string | null) => Promise<McpMutationResult>;
   updateMcp: (name: string, config: Partial<McpDraft>, directory?: string | null) => Promise<McpMutationResult>;
@@ -173,10 +175,18 @@ export const useMcpConfigStore = create<McpConfigStore>()(
         selectedMcpName: null,
         isLoading: false,
         mcpDraft: null,
+  currentDirectory: null,
 
         setSelectedMcp: (name) => set({ selectedMcpName: name }),
 
         setMcpDraft: (draft) => set({ mcpDraft: draft }),
+        setCurrentDirectory: (dir) => {
+          const prevDir = get().currentDirectory;
+          set({ currentDirectory: dir });
+          if (prevDir !== dir) {
+            void get().loadMcpConfigs({ force: true, directory: dir });
+          }
+        },
 
         loadMcpConfigs: async (options) => {
           const configDirectory = resolveDirectory(options?.directory);
