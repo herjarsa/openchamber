@@ -109,40 +109,21 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     reapManagedOrphanedProcesses = reapOrphanedProcesses,
     getWarmupDirectories = async () => [],
     onOpenCodeRestarted = null,
+    // Fired (best-effort, never awaited by the lifecycle) after the OpenCode
+    // server comes up — both the initial bootstrap and every restart. Used by
+    // session-assist to recover sessions stranded by a serve restart.
+    onOpenCodeReady = null,
     now = Date.now,
   } = deps;
 
-  const killProcessOnPortWin32 = (port) => {
-    try {
-      // Get-NetTCPConnection reads the same locale-independent WinNT API
-      // netstat's display layer translates (e.g. "LISTENING" renders as
-      // "ABHÖREN"/"ÉCOUTE"/"ESCUTANDO" on non-English Windows), so this
-      // works regardless of the OS display language.
-      const result = spawnSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Get-NetTCPConnection -State Listen -LocalPort ${Number.parseInt(port, 10)} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess`,
-        ],
-        { encoding: 'utf8', timeout: 5000, windowsHide: true }
-      );
-      const output = result.stdout || '';
-      const myPid = process.pid;
-      const pids = new Set();
-      for (const line of output.split(/\r?\n/)) {
-        const pid = Number.parseInt(line.trim(), 10);
-        if (pid && pid !== myPid) pids.add(pid);
-      }
-      for (const pid of pids) {
-        try {
-          spawnSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
-        } catch {
-        }
-      }
-    } catch {
-    }
+  // Best-effort notification that the OpenCode server is (re)started. Never
+  // awaited: a slow or failing consumer (e.g. the session-assist startup
+  // recovery scan) must not delay or break the lifecycle.
+  const notifyOpenCodeReady = () => {
+    if (typeof onOpenCodeReady !== 'function') return;
+    Promise.resolve(onOpenCodeReady()).catch((error) => {
+      console.warn(`[lifecycle] onOpenCodeReady hook failed: ${error?.message || error}`);
+    });
   };
 
   const killProcessOnPort = (port) => {
@@ -911,6 +892,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
 
     try {
       await state.currentRestartPromise;
+      notifyOpenCodeReady();
     } catch (error) {
       console.error(`Failed to restart OpenCode: ${error.message}`);
       state.lastOpenCodeError = error.message;
@@ -1138,6 +1120,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       },
     );
     if (!bootstrapError) {
+      notifyOpenCodeReady();
       void warmOpenCodeDirectories();
     }
   };

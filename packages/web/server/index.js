@@ -778,6 +778,9 @@ const sessionAssistRuntime = createSessionAssistRuntime({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
   getSmallModelService: async () => import('./lib/small-model/index.js'),
+  // Startup recovery scan: recovers sessions stranded on an interrupted turn
+  // after an OpenCode serve restart (which re-emits no status for them).
+  getStartupDirectories: getWarmupDirectories,
 });
 
 const sessionGoalRuntime = createSessionGoalRuntime({
@@ -1113,6 +1116,28 @@ Object.defineProperties(openCodeLifecycleState, {
   resolvedWslDistro: { get: () => resolvedWslDistro, set: (value) => { resolvedWslDistro = value; } },
 });
 
+// Most-recently-used directories first: OpenCode initializes each directory
+// lazily on first request (seconds on large session stores), so the lifecycle
+// warms these right after readiness — before the UI's first interactive
+// request would otherwise pay that cost. The session-assist startup recovery
+// scans the same list for sessions stranded by a serve restart.
+const getWarmupDirectories = async () => {
+  const settings = await readSettingsFromDiskMigrated().catch(() => null);
+  if (!settings) return [];
+  const directories = [];
+  if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
+    directories.push(settings.lastDirectory);
+  }
+  const projects = Array.isArray(settings.projects) ? [...settings.projects] : [];
+  projects.sort((a, b) => (b?.lastOpenedAt ?? 0) - (a?.lastOpenedAt ?? 0));
+  for (const project of projects) {
+    if (typeof project?.path === 'string' && project.path) {
+      directories.push(project.path);
+    }
+  }
+  return [...new Set(directories)];
+};
+
 const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   state: openCodeLifecycleState,
   env: {
@@ -1194,6 +1219,10 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
       console.warn('Failed to reconcile sessions after OpenCode restart:', error?.message ?? error);
     }
   },
+  // After EVERY serve (re)start — including health-check recovery restarts —
+  // re-run the session-assist startup recovery, which finds sessions stranded
+  // on interrupted turns and retries or recaps them.
+  onOpenCodeReady: () => sessionAssistRuntime.runStartupRecovery(),
   getManagedOpenCodeEnv: async () => {
     const settings = await readSettingsFromDiskMigrated().catch(() => null);
     // Each capability is its own tool and its own switch; the plugin is only
