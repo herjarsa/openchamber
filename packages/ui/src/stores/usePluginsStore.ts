@@ -1,17 +1,15 @@
 import { create } from 'zustand';
-import { devtools, persist, createJSONStorage } from 'zustand/middleware';
-import { getSafeStorage } from './utils/safeStorage';
-import {
-  startConfigUpdate,
-  finishConfigUpdate,
-} from '@/lib/configUpdate';
+import { devtools, persist } from 'zustand/middleware';
+import { createDeferredSafeJSONStorage } from './utils/safeStorage';
+import { startConfigUpdate } from '@/lib/configUpdate';
 import { refreshAfterOpenCodeRestart } from '@/stores/useAgentsStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { runtimeFetch } from '@/lib/runtime-fetch';
+import { noteDeferredRestartFromPayload } from '@/lib/opencode/deferredRestart';
 
 export type PluginScope = 'user' | 'project';
-export type PluginParsedKind = 'npm' | 'path';
+type PluginParsedKind = 'npm' | 'path';
 
 export interface PluginEntry {
   id: string;
@@ -43,6 +41,8 @@ export type PluginMutationResult = {
   reloadFailed?: boolean;
   message?: string;
   warning?: string;
+  requiresManualRestart?: boolean;
+  restartDeferred?: boolean;
 };
 
 export type RegistryResult =
@@ -91,6 +91,9 @@ type RegistryInfoResponse = {
 type PluginMutationPayload = {
   success?: boolean;
   requiresReload?: boolean;
+  requiresRestart?: boolean;
+  restartDeferred?: boolean;
+  requiresManualRestart?: boolean;
   message?: string;
   reloadDelayMs?: number;
   reloadFailed?: boolean;
@@ -123,7 +126,7 @@ const getConfigDirectory = (): string | null => {
 };
 
 const CLIENT_RELOAD_DELAY_MS = 800;
-export const PLUGINS_LOAD_CACHE_TTL_MS = 5000;
+const PLUGINS_LOAD_CACHE_TTL_MS = 5000;
 const DEFAULT_PLUGINS_CACHE_KEY = '__default__';
 const pluginsLastLoadedAt = new Map<string, number>();
 const pluginsLoadInFlight = new Map<string, Promise<boolean>>();
@@ -248,7 +251,7 @@ export const usePluginsStore = create<PluginsStore>()(
               body: JSON.stringify(buildEntryBody(input)),
             });
             return response;
-          }, get);
+          }, get, { restartId: input.spec });
           if (result.ok) {
             void get().loadRegistryInfo({ specs: [input.spec], force: true });
           }
@@ -265,7 +268,7 @@ export const usePluginsStore = create<PluginsStore>()(
               body: JSON.stringify(buildEntryBody(input)),
             });
             return response;
-          }, get);
+          }, get, { restartId: id });
           if (result.ok && nextSpec) {
             void get().loadRegistryInfo({ specs: [nextSpec], force: true });
           }
@@ -280,7 +283,7 @@ export const usePluginsStore = create<PluginsStore>()(
               headers: buildDirectoryHeaders(configDirectory),
             });
             return response;
-          }, get);
+          }, get, { restartId: id });
 
           if (result.ok && get().selectedId === id) {
             set({ selectedId: null });
@@ -317,7 +320,7 @@ export const usePluginsStore = create<PluginsStore>()(
               body: JSON.stringify(input),
             });
             return response;
-          }, get);
+          }, get, { restartId: input.fileName });
         },
 
         updateFile: async (id, input) => {
@@ -328,7 +331,7 @@ export const usePluginsStore = create<PluginsStore>()(
               body: JSON.stringify(input),
             });
             return response;
-          }, get);
+          }, get, { restartId: id });
         },
 
         deleteFile: async (id) => {
@@ -338,7 +341,7 @@ export const usePluginsStore = create<PluginsStore>()(
               headers: buildDirectoryHeaders(configDirectory),
             });
             return response;
-          }, get);
+          }, get, { restartId: id });
 
           if (result.ok && get().selectedId === id) {
             set({ selectedId: null });
@@ -352,7 +355,7 @@ export const usePluginsStore = create<PluginsStore>()(
       }),
       {
         name: 'plugins-store',
-        storage: createJSONStorage(() => getSafeStorage()),
+        storage: createDeferredSafeJSONStorage(),
         partialize: (state) => ({ selectedId: state.selectedId }),
       },
     ),
@@ -425,9 +428,8 @@ async function runPluginMutation(
   progressMessage: string,
   request: (configDirectory: string | null) => Promise<Response>,
   get: () => PluginsStore,
+  options?: { restartId?: string },
 ): Promise<PluginMutationResult> {
-  startConfigUpdate(progressMessage);
-  let requiresReload = false;
   try {
     const configDirectory = getConfigDirectory();
     const response = await request(configDirectory);
@@ -439,8 +441,30 @@ async function runPluginMutation(
 
     invalidatePluginCache(configDirectory);
 
+    if (payload?.requiresManualRestart) {
+      await get().loadPlugins({ force: true });
+      return {
+        ok: true,
+        requiresManualRestart: true,
+        reloadFailed: payload?.reloadFailed === true,
+        message: payload?.message,
+        warning: payload?.warning,
+      };
+    }
+
+    if (noteDeferredRestartFromPayload(payload, 'plugins', { id: options?.restartId })) {
+      await get().loadPlugins({ force: true });
+      return {
+        ok: true,
+        restartDeferred: true,
+        reloadFailed: payload?.reloadFailed === true,
+        message: payload?.message,
+        warning: payload?.warning,
+      };
+    }
+
     if (payload?.requiresReload) {
-      requiresReload = true;
+      startConfigUpdate(progressMessage);
       await refreshAfterOpenCodeRestart({
         message: payload.message,
         delayMs: payload.reloadDelayMs ?? CLIENT_RELOAD_DELAY_MS,
@@ -458,8 +482,6 @@ async function runPluginMutation(
   } catch (error) {
     console.error('[PluginsStore] Failed to update plugin configuration:', error);
     return { ok: false };
-  } finally {
-    if (!requiresReload) finishConfigUpdate();
   }
 }
 

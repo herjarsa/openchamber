@@ -2,6 +2,8 @@ import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import { DateTime } from 'luxon';
 import parser from 'cron-parser';
 import { expandSnippets } from '../opencode/snippets.js';
+import { buildGoalIntroText, createSessionGoal } from '../session-goal/create.js';
+import { discoverLoops } from './loops.js';
 
 const DEFAULT_GLOBAL_CONCURRENCY = 4;
 const DEFAULT_PROJECT_CONCURRENCY = 2;
@@ -91,6 +93,32 @@ export const parseScheduledCommandPrompt = (prompt) => {
     command: commandName,
     arguments: tail.join(' ').trim(),
   };
+};
+
+export const expandCommandGoalObjective = (template, argumentsText) => {
+  if (typeof template !== 'string' || !template.trim()) {
+    return null;
+  }
+
+  const rawArguments = String(argumentsText ?? '');
+  if (template.includes('$ARGUMENTS')) {
+    return template.replaceAll('$ARGUMENTS', rawArguments);
+  }
+
+  const positions = [...template.matchAll(/\$(\d+)/g)].map((match) => Number(match[1]));
+  if (positions.length > 0) {
+    const parsedArguments = [...rawArguments.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)]
+      .map((match) => match[1] ?? match[2] ?? match[3] ?? '');
+    const lastPosition = Math.max(...positions);
+    return template.replace(/\$(\d+)/g, (_match, value) => {
+      const position = Number(value);
+      return position === lastPosition
+        ? parsedArguments.slice(position - 1).join(' ')
+        : (parsedArguments[position - 1] ?? '');
+    });
+  }
+
+  return rawArguments ? `${template}\n\n${rawArguments}` : template;
 };
 
 export const computeNextRunAt = (task, nowMs = Date.now()) => {
@@ -225,6 +253,7 @@ export const createScheduledTasksRuntime = (deps) => {
     getOpenCodeAuthHeaders,
     waitForOpenCodeReady,
     emitTaskRunEvent,
+    setSessionAutoAccept,
     logger = console,
     maxGlobalConcurrency = DEFAULT_GLOBAL_CONCURRENCY,
     maxProjectConcurrency = DEFAULT_PROJECT_CONCURRENCY,
@@ -354,8 +383,19 @@ export const createScheduledTasksRuntime = (deps) => {
 
   const syncProject = async (projectID) => {
     await ensureProjectPath(projectID);
+    const projectPath = projectPathByID.get(projectID) || null;
 
-    const tasks = await projectConfigRuntime.listScheduledTasks(projectID);
+    let tasks;
+    if (projectPath) {
+      // Reconcile `.agents/loops` definitions with the persisted task list:
+      // loop files are authoritative while present, removed files unschedule
+      // their task, and runtime state is preserved (see loops.js).
+      const loops = await discoverLoops(projectPath);
+      tasks = await projectConfigRuntime.reconcileLoopTasks(projectID, loops);
+    } else {
+      tasks = await projectConfigRuntime.listScheduledTasks(projectID);
+    }
+
     setProjectTasks(projectID, tasks);
 
     for (const task of tasks) {
@@ -418,6 +458,9 @@ export const createScheduledTasksRuntime = (deps) => {
         type: 'text',
         text: expandSnippets(task.execution.prompt, projectPath),
       },
+      ...(task.execution.goalEnabled
+        ? [{ type: 'text', text: buildGoalIntroText(task.execution.goalTokenBudget), synthetic: true }]
+        : []),
     ],
   });
 
@@ -440,10 +483,10 @@ export const createScheduledTasksRuntime = (deps) => {
     }
   };
 
-  const runScheduledCommandIfApplicable = async ({ client, projectPath, sessionID, task }) => {
+  const resolveScheduledCommand = async ({ client, projectPath, task }) => {
     const parsed = parseScheduledCommandPrompt(task?.execution?.prompt);
     if (!parsed) {
-      return false;
+      return null;
     }
 
     let commands = [];
@@ -451,25 +494,24 @@ export const createScheduledTasksRuntime = (deps) => {
       const response = await client.command.list({ directory: projectPath });
       commands = Array.isArray(response?.data) ? response.data : [];
     } catch {
-      return false;
+      return null;
     }
 
-    const hasMatchingCommand = commands.some((command) => command?.name === parsed.command);
-    if (!hasMatchingCommand) {
-      return false;
-    }
+    const command = commands.find((candidate) => candidate?.name === parsed.command);
+    return command ? { ...parsed, template: command.template } : null;
+  };
 
+  const runScheduledCommand = async ({ client, projectPath, sessionID, task, command }) => {
     await client.session.command({
       sessionID,
       directory: projectPath,
-      command: parsed.command,
-      arguments: parsed.arguments,
+      command: command.command,
+      arguments: command.arguments,
       ...(task.execution.agent ? { agent: task.execution.agent } : {}),
       model: `${task.execution.providerID}/${task.execution.modelID}`,
       ...(task.execution.variant ? { variant: task.execution.variant } : {}),
     });
 
-    return true;
   };
 
   const runTaskWithWatchdog = async (projectID, task, reason) => {
@@ -511,13 +553,39 @@ export const createScheduledTasksRuntime = (deps) => {
     } catch {
     }
 
-    const executedAsCommand = await runScheduledCommandIfApplicable({
-      client,
-      projectPath,
-      sessionID,
-      task,
-    });
-    if (!executedAsCommand) {
+    if (task.execution.permissionAutoAccept && typeof setSessionAutoAccept === 'function') {
+      // Enroll before the prompt goes out so the very first permission request
+      // is already auto-approved. Enrollment failure must not kill the run —
+      // the task still executes, permissions just wait for the user.
+      try {
+        await setSessionAutoAccept(sessionID, true, projectPath);
+      } catch (error) {
+        logger.warn?.('[scheduled-tasks] failed to enable permission auto-accept for session', sessionID, error?.message ?? error);
+      }
+    }
+
+    const scheduledCommand = await resolveScheduledCommand({ client, projectPath, task });
+
+    if (task.execution.goalEnabled) {
+      const commandObjective = scheduledCommand
+        ? expandCommandGoalObjective(scheduledCommand.template, scheduledCommand.arguments)
+        : null;
+      await createSessionGoal({
+        baseUrl,
+        authHeaders,
+        sessionID,
+        directory: projectPath,
+        objective: commandObjective ?? expandSnippets(task.execution.prompt, projectPath),
+        tokenBudget: task.execution.goalTokenBudget,
+        providerID: task.execution.providerID,
+        modelID: task.execution.modelID,
+        onWarning: (message, error) => console.warn(`[scheduled-tasks] ${message}:`, error?.message || error),
+      });
+    }
+
+    if (scheduledCommand) {
+      await runScheduledCommand({ client, projectPath, sessionID, task, command: scheduledCommand });
+    } else {
       await runPromptAsync({
         baseUrl,
         authHeaders,

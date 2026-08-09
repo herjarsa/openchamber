@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { StoreApi, UseBoundStore } from "zustand";
-import { devtools, persist, createJSONStorage } from "zustand/middleware";
+import { devtools, persist } from "zustand/middleware";
 import { opencodeClient } from "@/lib/opencode/client";
 import {
   startConfigUpdate,
@@ -8,9 +8,11 @@ import {
   updateConfigUpdateMessage,
 } from "@/lib/configUpdate";
 import { emitConfigChange, scopeMatches, subscribeToConfigChanges } from "@/lib/configSync";
-import { getSafeStorage } from "./utils/safeStorage";
+import { createDeferredSafeJSONStorage } from "./utils/safeStorage";
 import { useProjectsStore } from "@/stores/useProjectsStore";
-import { fetchCommandConfig, createCommandConfig, updateCommandConfig, deleteCommandConfig, reloadConfig } from '@/lib/api/configApi';
+import { runtimeFetch } from "@/lib/runtime-fetch";
+import { runBackgroundNetworkTask } from '@/lib/background-network';
+import { noteDeferredRestartFromPayload } from "@/lib/opencode/deferredRestart";
 
 
 export type CommandScope = 'user' | 'project';
@@ -62,6 +64,42 @@ const buildCommandsSignature = (commands: Command[]): string => {
       String(command.isBuiltIn === true),
     ].join('|'))
     .join('||');
+};
+
+const upsertCommandLocal = (
+  set: (state: Partial<CommandsStore>) => void,
+  get: () => CommandsStore,
+  name: string,
+  config: Partial<CommandConfig>,
+) => {
+  const existing = get().commands.find((command) => command.name === name);
+  const nextCommand: Command = {
+    ...existing,
+    name,
+    ...config,
+    source: config.source ?? existing?.source,
+    scope: config.scope ?? existing?.scope,
+    isBuiltIn: existing?.isBuiltIn,
+  };
+  const commands = get().commands;
+  const nextCommands = commands.some((command) => command.name === name)
+    ? commands.map((command) => (command.name === name ? nextCommand : command))
+    : [...commands, nextCommand];
+  set({ commands: nextCommands });
+};
+
+const removeCommandLocal = (
+  set: (state: Partial<CommandsStore>) => void,
+  get: () => CommandsStore,
+  name: string,
+) => {
+  const nextState: Partial<CommandsStore> = {
+    commands: get().commands.filter((command) => command.name !== name),
+  };
+  if (get().selectedCommandName === name) {
+    nextState.selectedCommandName = null;
+  }
+  set(nextState);
 };
 
 const getRequestDirectory = (): string | null => {
@@ -166,21 +204,28 @@ export const useCommandsStore = create<CommandsStore>()(
 
             for (let attempt = 0; attempt < 3; attempt++) {
               try {
+                const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
                 // Ensure the list is scoped to the same directory we use for config source detection.
-                const commands = await opencodeClient.withDirectory(
+                const commands = await runBackgroundNetworkTask(() => opencodeClient.withDirectory(
                   directory,
                   () => opencodeClient.listCommandsWithDetails()
-                );
+                ));
 
                 const configurableCommands = commands.filter((cmd) => cmd.source !== 'skill');
                 const commandsWithScope = await Promise.all(
                   configurableCommands.map(async (cmd) => {
                     try {
                       // Force no-cache
-                      const commandConfig = await fetchCommandConfig(cmd.name, directory);
-                      if (commandConfig.ok) {
-                        const data = commandConfig.data;
+                      const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`, {
+                        headers: {
+                          'Cache-Control': 'no-cache',
+                          ...(directory ? { 'x-opencode-directory': directory } : {}),
+                        }
+                      });
+
+                      if (response.ok) {
+                        const data = await response.json();
 
                         // Prioritize explicit scope
                         let scope = data.scope;
@@ -237,8 +282,6 @@ export const useCommandsStore = create<CommandsStore>()(
         },
 
         createCommand: async (config: CommandConfig) => {
-          startConfigUpdate("Creating command configuration…");
-          let requiresReload = false;
           try {
             console.log('[CommandsStore] Creating command:', config.name);
 
@@ -254,22 +297,43 @@ export const useCommandsStore = create<CommandsStore>()(
             console.log('[CommandsStore] Command config to save:', commandConfig);
 
             const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const result = await createCommandConfig(config.name, commandConfig, directory);
-            if (!result.ok) {
-              const message = result.error || 'Failed to create command';
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(config.name)}${queryParams}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(directory ? { 'x-opencode-directory': directory } : {}),
+              },
+              body: JSON.stringify(commandConfig)
+            });
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+              const message = payload?.error || 'Failed to create command';
               throw new Error(message);
             }
 
             console.log('[CommandsStore] Command created successfully');
 
-            const needsReload = result.requiresReload ?? true;
             invalidateCommandsLoadCache(directory);
-            if (needsReload) {
-              requiresReload = true;
+
+            if (payload?.requiresManualRestart) {
+              upsertCommandLocal(set, get, config.name, config);
+              return true;
+            }
+
+            if (noteDeferredRestartFromPayload(payload, 'commands', { id: config.name })) {
+              upsertCommandLocal(set, get, config.name, config);
+              emitConfigChange("commands", { source: CONFIG_EVENT_SOURCE });
+              return true;
+            }
+
+            if (payload?.requiresReload) {
+              startConfigUpdate("Creating command configuration…");
               await performFullConfigRefresh({
-                message: result.message,
-                delayMs: result.reloadDelayMs,
+                message: payload?.message,
+                delayMs: payload?.reloadDelayMs,
               });
               return true;
             }
@@ -282,16 +346,10 @@ export const useCommandsStore = create<CommandsStore>()(
           } catch (error) {
             console.error("[CommandsStore] Failed to create command:", error);
             return false;
-          } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
           }
         },
 
         updateCommand: async (name: string, config: Partial<CommandConfig>) => {
-          startConfigUpdate("Updating command configuration…");
-          let requiresReload = false;
           try {
             console.log('[CommandsStore] Updating command:', name);
             console.log('[CommandsStore] Config received:', config);
@@ -306,22 +364,43 @@ export const useCommandsStore = create<CommandsStore>()(
             console.log('[CommandsStore] Command config to update:', commandConfig);
 
             const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const result = await updateCommandConfig(name, commandConfig, directory);
-            if (!result.ok) {
-              const message = result.error || 'Failed to update command';
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(directory ? { 'x-opencode-directory': directory } : {}),
+              },
+              body: JSON.stringify(commandConfig)
+            });
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+              const message = payload?.error || 'Failed to update command';
               throw new Error(message);
             }
 
             console.log('[CommandsStore] Command updated successfully');
 
-            const needsReload = result.requiresReload ?? true;
             invalidateCommandsLoadCache(directory);
-            if (needsReload) {
-              requiresReload = true;
+
+            if (payload?.requiresManualRestart) {
+              upsertCommandLocal(set, get, name, config);
+              return true;
+            }
+
+            if (noteDeferredRestartFromPayload(payload, 'commands', { id: name })) {
+              upsertCommandLocal(set, get, name, config);
+              emitConfigChange("commands", { source: CONFIG_EVENT_SOURCE });
+              return true;
+            }
+
+            if (payload?.requiresReload) {
+              startConfigUpdate("Updating command configuration…");
               await performFullConfigRefresh({
-                message: result.message,
-                delayMs: result.reloadDelayMs,
+                message: payload?.message,
+                delayMs: payload?.reloadDelayMs,
               });
               return true;
             }
@@ -334,35 +413,46 @@ export const useCommandsStore = create<CommandsStore>()(
           } catch (error) {
             console.error("[CommandsStore] Failed to update command:", error);
             return false;
-          } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
           }
         },
 
         deleteCommand: async (name: string) => {
-          startConfigUpdate("Deleting command configuration…");
-          let requiresReload = false;
           try {
             // Use active project root for project-level command support
             const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const result = await deleteCommandConfig(name, directory);
-            if (!result.ok) {
-              const message = result.error || 'Failed to delete command';
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
+              method: 'DELETE',
+              headers: directory ? { 'x-opencode-directory': directory } : undefined,
+            });
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+              const message = payload?.error || 'Failed to delete command';
               throw new Error(message);
             }
 
             console.log('[CommandsStore] Command deleted successfully');
 
-            const needsReload = result.requiresReload ?? true;
             invalidateCommandsLoadCache(directory);
-            if (needsReload) {
-              requiresReload = true;
+
+            if (payload?.requiresManualRestart) {
+              removeCommandLocal(set, get, name);
+              return true;
+            }
+
+            if (noteDeferredRestartFromPayload(payload, 'commands', { id: name })) {
+              removeCommandLocal(set, get, name);
+              emitConfigChange("commands", { source: CONFIG_EVENT_SOURCE });
+              return true;
+            }
+
+            if (payload?.requiresReload) {
+              startConfigUpdate("Deleting command configuration…");
               await performFullConfigRefresh({
-                message: result.message,
-                delayMs: result.reloadDelayMs,
+                message: payload?.message,
+                delayMs: payload?.reloadDelayMs,
               });
               return true;
             }
@@ -380,10 +470,6 @@ export const useCommandsStore = create<CommandsStore>()(
           } catch (error) {
             console.error("Failed to delete command:", error);
             return false;
-          } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
           }
         },
 
@@ -394,7 +480,7 @@ export const useCommandsStore = create<CommandsStore>()(
       }),
       {
         name: "commands-store",
-        storage: createJSONStorage(() => getSafeStorage()),
+        storage: createDeferredSafeJSONStorage(),
         partialize: (state) => ({
           selectedCommandName: state.selectedCommandName,
         }),
@@ -480,33 +566,6 @@ async function performFullConfigRefresh(options: { message?: string; delayMs?: n
     throw error;
   } finally {
     finishConfigUpdate();
-  }
-}
-
-export async function reloadOpenCodeConfiguration(options?: { message?: string; delayMs?: number }) {
-  startConfigUpdate(options?.message || "Reloading OpenCode configuration…");
-
-  try {
-    const result = await reloadConfig();
-    if (!result.ok) {
-      const message = result.error || 'Failed to reload configuration';
-      throw new Error(message);
-    }
-
-    if (result.requiresReload) {
-      await performFullConfigRefresh({
-        message: result.message,
-        delayMs: result.reloadDelayMs,
-      });
-    } else {
-      await performFullConfigRefresh(options);
-    }
-  } catch (error) {
-    console.error('[reloadOpenCodeConfiguration] Failed:', error);
-    updateConfigUpdateMessage('Failed to reload configuration. Please try again.');
-    await sleep(2000);
-    finishConfigUpdate();
-    throw error;
   }
 }
 

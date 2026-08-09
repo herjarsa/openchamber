@@ -10,18 +10,15 @@ import type {
   SkillsInstallRequest,
   SkillsInstallResponse,
   SkillsInstallError,
-  SkillsRepoScanError,
+  SkillsCatalogSourceResponse,
 } from '@/lib/api/types';
 
 import { invalidateSkillsLoadCache, refreshSkillsAfterOpenCodeRestart, useSkillsStore } from '@/stores/useSkillsStore';
 import { opencodeClient } from '@/lib/opencode/client';
-import { startConfigUpdate, finishConfigUpdate, updateConfigUpdateMessage } from '@/lib/configUpdate';
-import {
-  fetchSkillsCatalog,
-  fetchSkillsCatalogSource,
-  scanSkillsRepository,
-  installSkillsFromRepository,
-} from '@/lib/api/skillsApi';
+import { useProjectsStore } from '@/stores/useProjectsStore';
+import { startConfigUpdate } from '@/lib/configUpdate';
+import { runtimeFetch } from '@/lib/runtime-fetch';
+import { noteDeferredRestartFromPayload } from '@/lib/opencode/deferredRestart';
 
 const FALLBACK_SOURCES: SkillsCatalogSource[] = [
   {
@@ -50,20 +47,21 @@ const getSkillsCatalogCacheKey = (directory: string | null): string => {
   return directory?.trim() || DEFAULT_SKILLS_CATALOG_CACHE_KEY;
 };
 
-const getCurrentDirectory = (): string | null => {
-  const opencodeDirectory = opencodeClient.getDirectory();
-  if (typeof opencodeDirectory === 'string' && opencodeDirectory.trim().length > 0) {
-    return opencodeDirectory;
-  }
-
+const getRequestDirectory = (): string | null => {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const store = (window as any).__zustand_directory_store__;
-    if (store) {
-      return store.getState().currentDirectory;
+    const projectsStore = useProjectsStore.getState();
+    const activeProject = projectsStore.getActiveProject?.();
+
+    if (activeProject?.path?.trim()) {
+      return activeProject.path.trim();
     }
-  } catch {
-    // ignore
+
+    const clientDir = opencodeClient.getDirectory();
+    if (clientDir?.trim()) {
+      return clientDir.trim();
+    }
+  } catch (err) {
+    console.warn('[SkillsCatalogStore] Error resolving config directory:', err);
   }
 
   return null;
@@ -123,7 +121,7 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
       setSelectedSource: (id) => set({ selectedSourceId: id }),
 
       loadCatalog: async (options) => {
-        const currentDirectory = getCurrentDirectory();
+        const currentDirectory = getRequestDirectory();
         const cacheKey = getSkillsCatalogCacheKey(currentDirectory);
         const now = Date.now();
         const loadedAt = skillsCatalogLastLoadedAt.get(cacheKey) ?? 0;
@@ -151,17 +149,20 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
           let lastError: SkillsCatalogResponse['error'] | null = null;
 
           try {
+            const refresh = options?.refresh ? '?refresh=true' : '';
             const controller = new AbortController();
             const timeoutId = window.setTimeout(() => controller.abort(), 3000);
 
             try {
-              const payload = await fetchSkillsCatalog({
-                refresh: options?.refresh,
-                directory: currentDirectory ?? undefined,
+              const response = await runtimeFetch(`/api/config/skills/catalog${refresh}`, {
+                method: 'GET',
+                headers: { Accept: 'application/json' },
+                signal: controller.signal,
               });
 
-              if (!payload || !payload.ok) {
-                lastError = payload?.error || { kind: 'unknown', message: 'Failed to load catalog' };
+              const payload = (await response.json().catch(() => null)) as SkillsCatalogResponse | null;
+              if (!response.ok || !payload?.ok) {
+                lastError = payload?.error || { kind: 'unknown', message: `Failed to load catalog (${response.status})` };
                 throw new Error(lastError.message);
               }
 
@@ -224,21 +225,27 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
         set({ isLoadingSource: true, lastCatalogError: null });
 
         try {
-          const currentDirectory = getCurrentDirectory();
-          const payload = await fetchSkillsCatalogSource(sourceId, {
-            directory: currentDirectory ?? undefined,
-            refresh: options?.refresh,
+          const currentDirectory = getRequestDirectory();
+          const refresh = options?.refresh ? '&refresh=true' : '';
+          const queryParams = currentDirectory
+            ? `?directory=${encodeURIComponent(currentDirectory)}&sourceId=${encodeURIComponent(sourceId)}${refresh}`
+            : `?sourceId=${encodeURIComponent(sourceId)}${refresh}`;
+
+          const response = await runtimeFetch(`/api/config/skills/catalog/source${queryParams}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
           });
 
-          const hasItems = Array.isArray(payload?.items);
-          if (!payload || (!payload.ok && !hasItems)) {
-            const fallbackPayload = await fetchSkillsCatalog({
-              sourceId,
-              directory: currentDirectory ?? undefined,
-              refresh: options?.refresh,
+          const payload = (await response.json().catch(() => null)) as SkillsCatalogSourceResponse | null;
+          const hasItems = Array.isArray((payload as SkillsCatalogSourceResponse | null)?.items);
+          if (!response.ok || (!payload?.ok && !hasItems)) {
+            const fallback = await runtimeFetch(`/api/config/skills/catalog${queryParams}`, {
+              method: 'GET',
+              headers: { Accept: 'application/json' },
             });
+            const fallbackPayload = (await fallback.json().catch(() => null)) as SkillsCatalogResponse | null;
             const fallbackItems = fallbackPayload?.itemsBySource?.[sourceId];
-            if (fallbackPayload?.ok && Array.isArray(fallbackItems)) {
+            if (fallback.ok && fallbackPayload?.ok && Array.isArray(fallbackItems)) {
               set((state) => ({
                 itemsBySource: { ...state.itemsBySource, [sourceId]: fallbackItems },
                 pageInfoBySource: { ...state.pageInfoBySource, [sourceId]: { nextCursor: null } },
@@ -249,7 +256,7 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
             }
 
             set({
-              lastCatalogError: payload?.error || { kind: 'unknown', message: 'Failed to load source' },
+              lastCatalogError: payload?.error || { kind: 'unknown', message: `Failed to load source (${response.status})` },
             });
             return false;
           }
@@ -289,13 +296,23 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
 
         set({ isLoadingMore: true });
         try {
-          const currentDirectory = getCurrentDirectory();
-          const payload = await fetchSkillsCatalogSource(selectedSourceId, {
-            directory: currentDirectory ?? undefined,
-            cursor: cursor ?? undefined,
+          const currentDirectory = getRequestDirectory();
+          const parts = [`sourceId=${encodeURIComponent(selectedSourceId)}`];
+          if (currentDirectory) {
+            parts.push(`directory=${encodeURIComponent(currentDirectory)}`);
+          }
+          if (cursor) {
+            parts.push(`cursor=${encodeURIComponent(cursor)}`);
+          }
+          const queryParams = `?${parts.join('&')}`;
+
+          const response = await runtimeFetch(`/api/config/skills/catalog/source${queryParams}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
           });
 
-          if (!payload || !payload.ok) {
+          const payload = (await response.json().catch(() => null)) as SkillsCatalogSourceResponse | null;
+          if (!response.ok || !payload?.ok) {
             return false;
           }
 
@@ -341,17 +358,24 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
       scanRepo: async (request) => {
         set({ isScanning: true, lastScanError: null, scanResults: null });
         try {
-          const currentDirectory = getCurrentDirectory();
-          const payload = await scanSkillsRepository(request, currentDirectory ?? undefined);
+          const currentDirectory = getRequestDirectory();
+          const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
 
-          if (!payload) {
-            const error = { kind: 'unknown', message: 'Failed to scan repository' } as SkillsRepoScanError;
+          const response = await runtimeFetch(`/api/config/skills/scan${queryParams}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(request),
+          });
+
+          const payload = (await response.json().catch(() => null)) as SkillsRepoScanResponse | null;
+          if (!response.ok || !payload) {
+            const error = payload?.error || { kind: 'unknown', message: 'Failed to scan repository' };
             set({ lastScanError: error });
             return { ok: false, error };
           }
 
           if (!payload.ok) {
-            set({ lastScanError: payload.error || ({ kind: 'unknown', message: 'Failed to scan repository' } as SkillsRepoScanError) });
+            set({ lastScanError: payload.error || { kind: 'unknown', message: 'Failed to scan repository' } });
             return payload;
           }
 
@@ -363,39 +387,52 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
       },
 
       installSkills: async (request, options) => {
-        startConfigUpdate('Installing skills…');
         set({ isInstalling: true, lastInstallError: null });
-        let requiresReload = false;
         try {
           const directoryOverride = typeof options?.directory === 'string' && options.directory.trim().length > 0
             ? options.directory.trim()
             : null;
-          const currentDirectory = directoryOverride ?? getCurrentDirectory();
-          const payload = await installSkillsFromRepository(request, currentDirectory ?? undefined);
+          const currentDirectory = directoryOverride ?? getRequestDirectory();
+          const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
 
+          const response = await runtimeFetch(`/api/config/skills/install${queryParams}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(request),
+          });
+
+          const payload = (await response.json().catch(() => null)) as SkillsInstallResponse | null;
           if (!payload) {
             const error = { kind: 'unknown', message: 'Failed to install skills' } as SkillsInstallError;
             set({ lastInstallError: error });
-            updateConfigUpdateMessage('Failed to install skills. Please retry.');
             return { ok: false, error };
           }
 
-          if (!payload.ok) {
+          if (!response.ok || !payload.ok) {
             const error = payload.error || ({ kind: 'unknown', message: 'Failed to install skills' } as SkillsInstallError);
             set({ lastInstallError: error });
-            updateConfigUpdateMessage(error.message || 'Failed to install skills. Please retry.');
             return { ok: false, error };
+          }
+
+          invalidateSkillsLoadCache(currentDirectory);
+
+          if (payload.requiresManualRestart) {
+            void get().loadCatalog({ refresh: true });
+            return payload;
+          }
+
+          if (noteDeferredRestartFromPayload(payload, 'skills')) {
+            void get().loadCatalog({ refresh: true });
+            return { ...payload, restartDeferred: true };
           }
 
           if (payload.requiresReload) {
-            requiresReload = true;
+            startConfigUpdate('Installing skills…');
             await refreshSkillsAfterOpenCodeRestart({
               message: payload.message,
               delayMs: payload.reloadDelayMs,
             });
           } else {
-            updateConfigUpdateMessage(payload.message || 'Refreshing skills…');
-            invalidateSkillsLoadCache(currentDirectory);
             void useSkillsStore.getState().loadSkills();
           }
 
@@ -403,13 +440,9 @@ export const useSkillsCatalogStore = create<SkillsCatalogState>()(
         } catch (error) {
           const err = { kind: 'unknown', message: error instanceof Error ? error.message : String(error) } as SkillsInstallError;
           set({ lastInstallError: err });
-          updateConfigUpdateMessage('Failed to install skills. Please retry.');
           return { ok: false, error: err };
         } finally {
           set({ isInstalling: false });
-          if (!requiresReload) {
-            finishConfigUpdate();
-          }
         }
       },
     }),

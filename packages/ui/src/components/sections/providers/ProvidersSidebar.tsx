@@ -9,7 +9,8 @@ import { SettingsProjectSelector } from '@/components/sections/shared/SettingsPr
 import { Icon } from "@/components/icon/Icon";
 import { opencodeClient } from '@/lib/opencode/client';
 import { useI18n } from '@/lib/i18n';
-import { fetchProviderSource } from '@/lib/api/providersApi';
+import { runtimeFetch } from '@/lib/runtime-fetch';
+import { SETTINGS_PANEL_TITLE_CLASS } from '@/components/sections/shared/SettingsSection';
 
 const ADD_PROVIDER_ID = '__add_provider__';
 
@@ -61,8 +62,22 @@ export const ProvidersSidebar: React.FC<ProvidersSidebarProps> = ({ onItemSelect
     const loadAllSources = async () => {
       const tasks = providers.map(async (provider) => {
         try {
-          const sources = await fetchProviderSource(provider.id, directory ?? undefined);
-          if (cancelled || !sources) {
+          const query = directory ? `?directory=${encodeURIComponent(directory)}` : '';
+          // OpenChamber-only metadata endpoint: the SDK exposes provider data but
+          // not local auth/source-file provenance used by this settings sidebar.
+          const response = await runtimeFetch(`/api/provider/${encodeURIComponent(provider.id)}/source${query}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+          });
+          if (!response.ok) {
+            return;
+          }
+          const payload = await response.json().catch(() => null);
+          const sources = (payload?.sources ?? payload?.data?.sources) as ProviderSources | undefined;
+          if (!sources) {
+            return;
+          }
+          if (cancelled) {
             return;
           }
           setSourcesByProvider((prev) => ({
@@ -97,7 +112,7 @@ export const ProvidersSidebar: React.FC<ProvidersSidebarProps> = ({ onItemSelect
   return (
     <div className={cn('flex h-full flex-col', bgClass)}>
       <div className="border-b px-3 pt-4 pb-3">
-        <h2 className="text-base font-semibold text-foreground mb-3">{t('settings.providers.sidebar.title')}</h2>
+        <h2 className={`${SETTINGS_PANEL_TITLE_CLASS} mb-3`}>{t('settings.providers.sidebar.title')}</h2>
         <SettingsProjectSelector className="mb-3" />
         <div className="flex items-center justify-between gap-2">
           <span className="typography-meta text-muted-foreground">{t('settings.providers.sidebar.total', { count: providers.length })}</span>

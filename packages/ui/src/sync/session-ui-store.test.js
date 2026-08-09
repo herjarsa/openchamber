@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { opencodeClient } from '@/lib/opencode/client';
+import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useSessionWorktreeStore } from './session-worktree-store';
-import { routeMessage, useSessionUIStore } from './session-ui-store';
+import { expandSlashCommandGoalObjective, routeMessage, useSessionUIStore } from './session-ui-store';
 import { setActionRefs, setOptimisticRefs } from './session-actions';
 import { useSkillsStore } from '@/stores/useSkillsStore';
 import { useCommandsStore } from '@/stores/useCommandsStore';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 
 /**
  * Unit tests for session worktree routing through the authoritative store.
@@ -226,6 +229,212 @@ describe('routeMessage directory scoping', () => {
   });
 });
 
+describe('sendMessage captured target', () => {
+  let originalSendMessage;
+  const calls = [];
+
+  beforeEach(() => {
+    calls.length = 0;
+    const childStore = {
+      getState: () => ({ session: [], message: {}, part: {}, session_status: {} }),
+      setState: () => {},
+    };
+    const childStores = {
+      children: new Map(),
+      ensureChild: () => childStore,
+      getChild: () => childStore,
+    };
+    setActionRefs(opencodeClient, childStores, () => '/current/project');
+    setOptimisticRefs(() => {}, () => {});
+    useConfigStore.setState({ isConnected: true });
+    useSessionUIStore.setState({
+      currentSessionId: 'session-current',
+      currentSessionDirectory: '/current/project',
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+    });
+
+    originalSendMessage = opencodeClient.sendMessage;
+    opencodeClient.sendMessage = async (params) => {
+      calls.push(params);
+      return 'msg';
+    };
+  });
+
+  afterEach(() => {
+    opencodeClient.sendMessage = originalSendMessage;
+  });
+
+  const sendToTarget = (target) => useSessionUIStore.getState().sendMessage(
+    'queued message',
+    'provider-a',
+    'model-a',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    'normal',
+    { target },
+  );
+
+  test('uses the target captured before the active session changes', async () => {
+    await sendToTarget({
+      runtimeKey: getRuntimeKey(),
+      sessionId: 'session-captured',
+      directory: '/captured/project',
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].runtimeKey).toBe(getRuntimeKey());
+    expect(calls[0].id).toBe('session-captured');
+    expect(calls[0].directory).toBe('/captured/project');
+  });
+
+  test('does not send a captured target through a different runtime', async () => {
+    let error = null;
+    try {
+      await sendToTarget({
+        runtimeKey: `${getRuntimeKey()}-stale`,
+        sessionId: 'session-captured',
+        directory: '/captured/project',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('runtime changed');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('slash-command goal objectives', () => {
+  test('expands every $ARGUMENTS reference from the authoritative command template', () => {
+    expect(expandSlashCommandGoalObjective('/issue--to-pr LIN-123 --draft', [{
+      name: 'issue--to-pr',
+      template: 'Run the issue pipeline for $ARGUMENTS. Verify $ARGUMENTS is represented by the PR.',
+    }])).toBe('Run the issue pipeline for LIN-123 --draft. Verify LIN-123 --draft is represented by the PR.');
+  });
+
+  test('keeps the invocation when the command template is unavailable', () => {
+    expect(expandSlashCommandGoalObjective('/issue--to-pr LIN-123', [{ name: 'issue--to-pr' }]))
+      .toBe('/issue--to-pr LIN-123');
+  });
+
+  test('matches OpenCode positional and implicit argument expansion', () => {
+    expect(expandSlashCommandGoalObjective('/move "src old" dist extra', [{
+      name: 'move',
+      template: 'Move $1 to $2',
+    }])).toBe('Move src old to dist extra');
+    expect(expandSlashCommandGoalObjective('/review auth module', [{
+      name: 'review',
+      template: 'Review the requested scope.',
+    }])).toBe('Review the requested scope.\n\nauth module');
+  });
+});
+
+describe('runtime worktree topology', () => {
+  test('restores independent in-memory maps across A -> B -> A', () => {
+    const topologyA = new Map([['/repo', [{ path: '/repo/a', branch: 'a' }]]]);
+    const topologyB = new Map([['/repo', [{ path: '/repo/b', branch: 'b' }]]]);
+
+    useSessionUIStore.setState({ availableWorktreesByProject: topologyA, availableWorktrees: topologyA.get('/repo') });
+    useSessionUIStore.getState().prepareForRuntimeSwitch('runtime-a');
+    useSessionUIStore.setState({ availableWorktreesByProject: topologyB, availableWorktrees: topologyB.get('/repo') });
+    useSessionUIStore.getState().prepareForRuntimeSwitch('runtime-b');
+
+    useSessionUIStore.getState().restoreForRuntimeSwitch('runtime-a');
+    expect(useSessionUIStore.getState().availableWorktreesByProject.get('/repo')?.[0]?.path).toBe('/repo/a');
+
+    useSessionUIStore.getState().restoreForRuntimeSwitch('runtime-b');
+    expect(useSessionUIStore.getState().availableWorktreesByProject.get('/repo')?.[0]?.path).toBe('/repo/b');
+  });
+});
+
+describe('openNewSessionDraft project binding', () => {
+  const projectA = { id: 'proj-a', path: '/projects/alpha', label: 'Alpha' };
+  const projectB = { id: 'proj-b', path: '/projects/beta', label: 'Beta' };
+
+  beforeEach(() => {
+    useSessionUIStore.setState({
+      currentSessionId: null,
+      currentSessionDirectory: null,
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+      availableWorktreesByProject: new Map(),
+    });
+    useProjectsStore.setState({
+      projects: [projectA, projectB],
+      activeProjectId: projectA.id,
+    });
+    useDirectoryStore.getState().setDirectory(projectB.path, { showOverlay: false });
+  });
+
+  test('keeps implicit draft on current directory when active project differs', () => {
+    useSessionUIStore.getState().openNewSessionDraft();
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.open).toBe(true);
+    expect(draft.selectedProjectId).toBe(projectB.id);
+    expect(draft.directoryOverride).toBe(projectB.path);
+  });
+
+  test('does not attach active project when current directory is unmatched', () => {
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+
+    useSessionUIStore.getState().openNewSessionDraft();
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.open).toBe(true);
+    expect(draft.selectedProjectId).toBeNull();
+    expect(draft.directoryOverride).toBe('/external/worktree');
+  });
+
+  test('respects explicit directoryOverride over active project', () => {
+    useSessionUIStore.getState().openNewSessionDraft({ directoryOverride: '/projects/beta/src' });
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.open).toBe(true);
+    expect(draft.directoryOverride).toBe('/projects/beta/src');
+  });
+
+  test('respects explicit selectedProjectId over active project', () => {
+    useSessionUIStore.getState().openNewSessionDraft({ selectedProjectId: projectB.id });
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.open).toBe(true);
+    expect(draft.selectedProjectId).toBe(projectB.id);
+  });
+});
+
+describe('createSession draft lifecycle', () => {
+  let originalCreateSession;
+
+  beforeEach(() => {
+    originalCreateSession = opencodeClient.createSession;
+    useSessionUIStore.setState({
+      currentSessionId: null,
+      currentSessionDirectory: null,
+      newSessionDraft: { open: true, directoryOverride: '/projects/alpha', parentID: null, title: 'Draft title' },
+    });
+  });
+
+  afterEach(() => {
+    opencodeClient.createSession = originalCreateSession;
+  });
+
+  test('keeps the draft open when session creation fails', async () => {
+    opencodeClient.createSession = async () => {
+      throw new Error('offline');
+    };
+
+    const session = await useSessionUIStore.getState().createSession('Draft title', '/projects/alpha');
+
+    expect(session).toBeNull();
+    expect(useSessionUIStore.getState().newSessionDraft.open).toBe(true);
+    expect(useSessionUIStore.getState().newSessionDraft.title).toBe('Draft title');
+  });
+});
+
 describe('routeMessage skill invocation', () => {
   // OpenCode registers every skill as a command (source: "skill"), so a skill
   // selected from the slash menu must be dispatched via session.command so its
@@ -241,7 +450,12 @@ describe('routeMessage skill invocation', () => {
 
     // Minimal optimistic + connection machinery so routeMessage can dispatch.
     const childStore = {
-      getState: () => ({ session_status: {} }),
+      getState: () => ({
+        session: [],
+        message: {},
+        part: {},
+        session_status: {},
+      }),
       setState: () => {},
     };
     const childStores = {
@@ -323,5 +537,83 @@ describe('routeMessage skill invocation', () => {
 
     expect(sendMessageCalls).toHaveLength(1);
     expect(sendCommandCalls).toHaveLength(0);
+  });
+});
+
+describe('archiveSessions option forwarding', () => {
+  let originalUpdateSession;
+  let updateSessionCalls;
+
+  beforeEach(() => {
+    updateSessionCalls = [];
+    originalUpdateSession = opencodeClient.updateSession;
+    opencodeClient.updateSession = (sessionId) => {
+      updateSessionCalls.push(sessionId);
+      return Promise.resolve(null);
+    };
+  });
+
+  afterEach(() => {
+    opencodeClient.updateSession = originalUpdateSession;
+  });
+
+  // The store used to accept an options object and silently drop it, so a
+  // caller-supplied runtime key had no effect. Passing a key that cannot match
+  // the active runtime must abort the batch before any SDK call.
+  test('honors expectedRuntimeKey instead of discarding the options object', async () => {
+    const result = await useSessionUIStore.getState().archiveSessions(['session-x', 'session-y'], {
+      expectedRuntimeKey: 'runtime-that-is-not-active',
+    });
+
+    expect(result).toEqual({ archivedIds: [], failedIds: ['session-x', 'session-y'] });
+    expect(updateSessionCalls).toEqual([]);
+  });
+
+  test('unarchiveSessions honors expectedRuntimeKey instead of discarding the options object', async () => {
+    const result = await useSessionUIStore.getState().unarchiveSessions(['session-x', 'session-y'], {
+      expectedRuntimeKey: 'runtime-that-is-not-active',
+    });
+
+    expect(result).toEqual({ restoredIds: [], failedIds: ['session-x', 'session-y'] });
+    expect(updateSessionCalls).toEqual([]);
+  });
+});
+
+describe('deleteSessions option forwarding', () => {
+  let originalDeleteSession;
+  let deleteSessionCalls;
+
+  beforeEach(() => {
+    deleteSessionCalls = [];
+    originalDeleteSession = opencodeClient.deleteSession;
+    opencodeClient.deleteSession = (sessionId) => {
+      deleteSessionCalls.push(sessionId);
+      return Promise.resolve(true);
+    };
+  });
+
+  afterEach(() => {
+    opencodeClient.deleteSession = originalDeleteSession;
+  });
+
+  // The store accepted an options object and dropped it on both the single and
+  // batch delete paths. A key that cannot match the active runtime must abort
+  // before any SDK call rather than deleting and erasing persisted state.
+  test('honors expectedRuntimeKey on the batch delete instead of discarding options', async () => {
+    const result = await useSessionUIStore.getState().deleteSessions(['session-x', 'session-y'], {
+      expectedRuntimeKey: 'runtime-that-is-not-active',
+    });
+
+    expect(result).toEqual({ deletedIds: [], failedIds: ['session-x', 'session-y'] });
+    expect(deleteSessionCalls).toEqual([]);
+  });
+
+  test('honors expectedRuntimeKey on the single delete instead of discarding options', async () => {
+    const deleted = await useSessionUIStore.getState().deleteSession('session-x', {
+      expectedRuntimeKey: 'runtime-that-is-not-active',
+    });
+
+    expect(deleted).toBe(false);
+    expect(deleteSessionCalls).toEqual([]);
   });
 });
