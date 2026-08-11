@@ -21,7 +21,7 @@ import { noteDeferredRestartFromPayload, recordDeferredOpenCodeRestart } from '@
 import { cn } from '@/lib/utils';
 import type { ModelMetadata } from '@/types';
 import { getCurrentIntlLocale, useI18n } from '@/lib/i18n';
-import { fetchProviderSource } from '@/lib/api/providersApi';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 import { opencodeClient } from '@/lib/opencode/client';
 import { shouldLoadAvailableProviders } from './providerAvailability';
 import {
@@ -337,7 +337,19 @@ export const ProvidersPage: React.FC = () => {
 
     const loadSources = async () => {
       try {
-        const sources = await fetchProviderSource(selectedProviderId);
+        // OpenChamber-only metadata endpoint: the SDK exposes provider data but
+        // not local auth/source-file provenance used by this settings UI.
+        const response = await runtimeFetch(`/api/provider/${encodeURIComponent(selectedProviderId)}/source`, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw new Error(payload?.error || t('settings.providers.page.toast.providerSourcesLoadFailed'));
+        }
+
+        const sources = (payload?.sources ?? payload?.data?.sources) as ProviderSources | undefined;
         if (!cancelled && sources) {
           setProviderSources((prev) => ({
             ...prev,
