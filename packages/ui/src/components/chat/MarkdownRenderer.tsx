@@ -5,9 +5,9 @@ import { cn } from '@/lib/utils';
 import { loadMarkdownRendererModule } from './markdownRendererLoader';
 
 // Thin lazy wrapper around the heavy MarkdownRenderer implementation.
-// The full implementation (marked, react-markdown, beautiful-mermaid,
-// react-syntax-highlighter, etc.) is loaded on demand, keeping the
-// initial bundle lean.
+// The full implementation (morphdom-based streaming renderer with Shiki
+// syntax highlighting and beautiful-mermaid diagrams) is loaded on demand,
+// keeping the initial bundle lean.
 
 const MarkdownRendererLazy = lazyWithChunkRecovery(() =>
   loadMarkdownRendererModule().then((m) => ({ default: m.MarkdownRenderer }))

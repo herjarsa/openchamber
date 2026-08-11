@@ -51,6 +51,7 @@ import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
+import { subagentNotificationBatcher } from './subagent-notification-batcher'
 import { applyGlobalSessionStatusEvent, applyGlobalSessionStatusSnapshot, useGlobalSessionStatusStore } from "./global-session-status"
 import type { State } from "./types"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
@@ -515,6 +516,34 @@ function isViewedInCurrentSession(directory: string, sessionId?: string): boolea
 
 function isRecentBoot() {
   return bootingRoot || Date.now() - bootedAt < BOOT_DEBOUNCE_MS
+}
+
+export function findParentToolPartForSubagent(
+  subagentSessionID: string,
+  state: State,
+): { parentSessionID: string; parentMessageID: string; parentPartID: string } | null {
+  const subagent = state.session.find((s) => s.id === subagentSessionID)
+  const parentID = (subagent as Session & { parentID?: string | null })?.parentID
+  if (!parentID) return null
+
+  const parentMessages = state.message[parentID]
+  if (!Array.isArray(parentMessages)) return null
+
+  for (const message of parentMessages) {
+    const parts = state.part[message.id]
+    if (!Array.isArray(parts)) continue
+    for (const part of parts) {
+      if (part.type !== "tool") continue
+      const toolPart = part as Part & { tool?: string; output?: unknown }
+      if (toolPart.tool !== "task") continue
+      const output = typeof toolPart.output === "string" ? toolPart.output : ""
+      if (output.includes(`<task id="${subagentSessionID}">`) || output.includes(`<task id='${subagentSessionID}'>`)) {
+        return { parentSessionID: parentID, parentMessageID: message.id, parentPartID: part.id }
+      }
+    }
+  }
+
+  return null
 }
 
 function getViewedSessionMaterializationTarget(directory: string) {
@@ -1343,6 +1372,7 @@ async function resyncDirectoryAfterReconnect(
   await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "authoritative")
 
   const scopedClient = opencodeClient.getScopedSdkClient(directory)
+  const resyncedChildSessions = new Set<string>()
   await Promise.all(candidateSessionIds.map(async (sessionId) => {
     syncDebug.recovery.materializing({ reason, directory, sessionID: sessionId })
     const loader = getImperativeSessionMessageLoader()
@@ -1358,6 +1388,11 @@ async function resyncDirectoryAfterReconnect(
     if (!session) return
 
     const nextSession = stripSessionDiffSnapshots(session)
+
+    // Track child sessions for parent resync
+    if (nextSession.parentID) {
+      resyncedChildSessions.add(nextSession.id)
+    }
     store.setState((state: DirectoryStore) => {
       const sessionIndex = state.session.findIndex((item) => item.id === nextSession.id)
       let sessions = state.session
@@ -1391,6 +1426,26 @@ async function resyncDirectoryAfterReconnect(
     setIndexedSessionDirectory(routingIndex, nextSession.id, directory)
     setIndexedSessionMessages(routingIndex, sessionId, directory, store.getState().message[sessionId] ?? [])
   }))
+
+  // Resync parent sessions to update tool parts that reference child sessions
+  // This covers SSE reconnect where child sessions complete during disconnect,
+  // but parent session tool parts don't get the updated tool state/output.
+  // IMPORTANT: Must run BEFORE ingestDirectoryStateIntoRoutingIndex so the
+  // routing index reflects the updated parent session messages/parts.
+  if (resyncedChildSessions.size > 0) {
+    const parentSessionIds = new Set<string>()
+    for (const childSessionId of resyncedChildSessions) {
+      const childSession = store.getState().session.find((s) => s.id === childSessionId)
+      if (childSession?.parentID) {
+        parentSessionIds.add(childSession.parentID)
+      }
+    }
+
+    const loader = getImperativeSessionMessageLoader()
+    await Promise.all(Array.from(parentSessionIds).map(async (parentSessionId) => {
+      await loader?.refreshTail({ directory, sessionID: parentSessionId }, RECONNECT_MESSAGE_LIMIT)
+    }))
+  }
 
   await resyncBlockingRequestsForDirectory(directory, store, candidateSessionIds)
 
@@ -1592,35 +1647,51 @@ export function handleEvent(
   if (payload.type === "session.idle" || payload.type === "session.error") {
     const props = payload.properties as { sessionID?: string; error?: { message?: string; code?: string } }
     const sessionID = props.sessionID
-    // Skip subtask sessions — only top-level sessions generate notifications
     const storeState = getDirectoryEventState(store, batch)
-    const session = storeState.session.find((s) => s.id === sessionID)
-    if (session && (session as { parentID?: string }).parentID) {
-      // subtask — skip notification
-    } else if (sessionID) {
-      appendNotification({
-        directory: resolvedDirectory,
-        session: sessionID,
-        time: Date.now(),
-        viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
-        ...(payload.type === "session.error"
-          ? { type: "error" as const, error: props.error }
-          : { type: "turn-complete" as const }),
-      })
+    const session = sessionID ? storeState.session.find((s) => s.id === sessionID) : undefined
+    const isSubtask = Boolean(session && (session as { parentID?: string }).parentID)
+
+    if (sessionID) {
+      if (isSubtask) {
+        // Route subtask events to the batcher — it groups and emits consolidated
+        // notifications for sibling subagents.
+        subagentNotificationBatcher.queue(
+          {
+            directory: resolvedDirectory,
+            sessionID,
+            parentID: (session as { parentID?: string }).parentID!,
+            type: payload.type === "session.error" ? "error" : "idle",
+            ...(payload.type === "session.error" ? { error: props.error } : {}),
+            time: Date.now(),
+          },
+          () => getDirectoryEventState(store, batch),
+        )
+      } else {
+        // Non-subtask sessions use the existing notification flow unchanged.
+        appendNotification({
+          directory: resolvedDirectory,
+          session: sessionID,
+          time: Date.now(),
+          viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
+          ...(payload.type === "session.error"
+            ? { type: "error" as const, error: props.error }
+            : { type: "turn-complete" as const }),
+        })
+      }
     }
   }
 
-  // Sync-layer parent resync: when a child session goes idle, recover
-  // the parent session snapshot. This ensures the
-  // parent's task tool part reflects the child's completion even when
-  // no ToolPart component is mounted.
-  if (payload.type === "session.idle") {
-    const idleSessionId = getSessionIdFromPayload(payload)
-    if (idleSessionId && resolvedDirectory && resolvedDirectory !== "global") {
+  // Sync-layer parent resync: when a child session goes idle or errors,
+  // recover the parent session snapshot. This ensures the parent's task tool
+  // part reflects the child's completion (or failure) even when no ToolPart
+  // component is mounted.
+  if (payload.type === "session.idle" || payload.type === "session.error") {
+    const changedSessionId = getSessionIdFromPayload(payload)
+    if (changedSessionId && resolvedDirectory && resolvedDirectory !== "global") {
       const sessionState = getDirectoryEventState(store, batch)
-      const idleSession = sessionState.session.find((s) => s.id === idleSessionId)
-      const parentID = idleSession
-        ? (idleSession as Session & { parentID?: string | null }).parentID
+      const changedSession = sessionState.session.find((s) => s.id === changedSessionId)
+      const parentID = changedSession
+        ? (changedSession as Session & { parentID?: string | null }).parentID
         : null
       if (parentID) {
         enqueueSessionMaterialization(resolvedDirectory, parentID, childStores, { reason: "child-session-idle" })
@@ -1663,8 +1734,11 @@ export function handleEvent(
       break
     case "session.status":
     case "session.idle":
+      cloneField("session_status", (value) => ({ ...(value ?? {}) }))
+      break
     case "session.error":
       cloneField("session_status", (value) => ({ ...(value ?? {}) }))
+      cloneField("session_error", (value) => ({ ...(value ?? {}) }))
       break
     case "todo.updated":
       cloneField("todo", (value) => ({ ...value }))

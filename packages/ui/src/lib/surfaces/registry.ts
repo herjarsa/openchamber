@@ -14,7 +14,8 @@ export type ContextSurfaceId =
   | 'context'
   | 'browser'
   | 'preview'
-  | 'chat';
+  | 'chat'
+  | 'subagents';
 
 export type ContextSurfaceDescriptor = {
   id: ContextSurfaceId;
@@ -146,6 +147,15 @@ export const CONTEXT_SURFACES: readonly ContextSurfaceDescriptor[] = [
     icon: 'chat-4',
     labelKey: 'contextPanel.mode.chat',
     availability: 'has-content',
+  },
+  {
+    id: 'subagents',
+    descriptionKey: 'contextRail.surface.subagents.description',
+    defaultWidthFraction: 0.4,
+    mode: 'subagents',
+    icon: 'user-3',
+    labelKey: 'contextPanel.mode.subagents',
+    availability: 'always',
   },
 ];
 

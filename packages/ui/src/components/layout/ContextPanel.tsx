@@ -17,6 +17,7 @@ const FilesView = lazyWithChunkRecovery(() => import('@/components/views/FilesVi
 const GitView = lazyWithChunkRecovery(() => import('@/components/views/GitView').then((m) => ({ default: m.GitView })));
 const PlanView = lazyWithChunkRecovery(() => import('@/components/views/PlanView').then((m) => ({ default: m.PlanView })));
 import { ProjectContextPanel } from './RightSidebarTabs';
+import { SubagentsPanel } from './SubagentsPanel';
 import { SidebarFilesTree } from './SidebarFilesTree';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { openExternalUrl } from '@/lib/url';
@@ -170,6 +171,7 @@ const getModeLabel = (
   if (mode === 'plan') return t('contextPanel.mode.plan');
   if (mode === 'preview') return t('contextPanel.mode.preview');
   if (mode === 'browser') return t('contextPanel.mode.browser');
+  if (mode === 'subagents') return t('contextPanel.mode.subagents');
   if (mode === 'git') return t('layout.rightSidebar.git');
   if (mode === 'pr') return t('contextPanel.mode.pr');
   if (mode === 'notes') return t('contextRail.surface.notes');
@@ -2707,6 +2709,8 @@ export const ContextPanel: React.FC = () => {
             ? <React.Suspense fallback={null}><GitView isActive={isOpen} /></React.Suspense>
             : activeTab?.mode === 'pr'
                 ? <PullRequestView />
+            : activeTab?.mode === 'subagents'
+                ? <SubagentsPanel />
             : activeTab?.mode === 'notes'
                 ? <ProjectContextPanel />
         : activeTab?.mode === 'plan'
