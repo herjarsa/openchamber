@@ -1,4 +1,21 @@
 const DEFAULT_TARGET_TTL_MS = 30 * 60 * 1000;
+
+// Connection-level failures mean the upstream origin is not accepting
+// connections at all (process not listening / dead socket). These are
+// surfaced to the renderer via the preview target error header so the UI can
+// stop retrying and show an actionable "unreachable" state instead of
+// hammering the dead origin indefinitely.
+const UPSTREAM_CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'ENOTFOUND',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EAI_AGAIN',
+]);
 const TOKEN_COOKIE_NAME = 'oc_preview_token';
 const TOKEN_QUERY_PARAM = 'oc_preview_token';
 const CLIENT_TOKEN_QUERY_PARAM = 'oc_client_token';
@@ -1544,6 +1561,13 @@ export const createPreviewProxyRuntime = ({
               } catch {
                 payload.details = { message };
               }
+            }
+
+            const errorCode = err && typeof err === 'object' && typeof err.code === 'string'
+              ? err.code
+              : '';
+            if (UPSTREAM_CONNECTION_ERROR_CODES.has(errorCode)) {
+              res.setHeader(PREVIEW_TARGET_ERROR_HEADER, 'unreachable');
             }
 
             res.status(502).json(payload);

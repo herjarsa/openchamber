@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
   applyPreviewPassthroughRequestHeaders,
@@ -524,5 +524,32 @@ describe('preview CSP rewrite', () => {
   it('returns empty/unset CSP values unchanged', () => {
     expect(rewritePreviewCspHeader('', 'abc123')).toBe('');
     expect(rewritePreviewCspHeader(undefined, 'abc123')).toBe(undefined);
+  });
+});
+
+describe('preview proxy upstream connection errors', () => {
+  const { proxyOptions } = createAttachedPreviewRuntime();
+  const silencedConsole = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  afterAll(() => {
+    silencedConsole.mockRestore();
+  });
+
+  it('flags unreachable upstreams via the target error header', () => {
+    const res = createResponse();
+    const error = new Error('connect ECONNREFUSED 127.0.0.1:5180');
+    error.code = 'ECONNREFUSED';
+    proxyOptions().on.error(error, { originalUrl: '/api/preview/proxy/abc123' }, res);
+    expect(res.statusCode).toBe(502);
+    expect(res.headers.get(PREVIEW_TARGET_ERROR_HEADER)).toBe('unreachable');
+  });
+
+  it('does not flag non-connection proxy errors', () => {
+    const res = createResponse();
+    const error = new Error('socket hang up');
+    error.code = 'ERR_STREAM_WRITE_AFTER_END';
+    proxyOptions().on.error(error, { originalUrl: '/api/preview/proxy/abc123' }, res);
+    expect(res.statusCode).toBe(502);
+    expect(res.headers.has(PREVIEW_TARGET_ERROR_HEADER)).toBe(false);
   });
 });

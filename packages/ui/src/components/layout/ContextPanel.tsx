@@ -1174,6 +1174,26 @@ const PreviewPane: React.FC<PreviewPaneProps> = ({ rawUrl, onNavigate }) => {
         response.headers,
         proxyRecoveryAttemptedKeyRef.current === proxyCacheKey,
       );
+      if (recoveryAction === 'retry-grace') {
+        // The proxy signals the upstream origin is not accepting connections
+        // (ECONNREFUSED & friends). The target itself is valid — the origin
+        // may be a dev server that is still binding — so keep retrying with
+        // backoff during the startup grace window, then settle on a stable
+        // "unreachable" state (rendered with a manual retry button) instead
+        // of probing a dead origin forever.
+        const startedAt = upstreamProbeStartedAtRef.current || Date.now();
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < PREVIEW_STARTUP_GRACE_MS) {
+          setUpstreamState('starting');
+          upstreamProbeAttemptRef.current += 1;
+          const attempt = upstreamProbeAttemptRef.current;
+          const delay = Math.min(2000, 250 * Math.pow(2, Math.min(4, attempt)));
+          scheduleRetry(delay);
+          return;
+        }
+        setUpstreamState('unreachable');
+        return;
+      }
       if (recoveryAction !== 'none') {
         previewProxyTargetCache.delete(proxyCacheKey);
         if (recoveryAction === 'retry-registration') {
