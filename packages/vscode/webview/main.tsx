@@ -1035,6 +1035,18 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
     }
   }
 
+  const quotaCredentialMatch = pathname.match(/^\/api\/quota\/credentials\/(ollama-cloud|cursor)(?:\/(validate|import))?$/);
+  if (quotaCredentialMatch) {
+    try {
+      const body = method === 'PUT' ? await extractJsonBody(input, init, method) : undefined;
+      const bridgeMethod = quotaCredentialMatch[2]?.toUpperCase() || method;
+      const data = await sendBridgeMessage('api:quota:credentials', { providerId: quotaCredentialMatch[1], method: bridgeMethod, credential: body });
+      return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Response(JSON.stringify({ error: message }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+  }
   const quotaMatch = pathname.match(/^\/api\/quota\/([^/]+)$/);
   if (quotaMatch && method === 'GET') {
     const providerId = decodeURIComponent(quotaMatch[1]);
