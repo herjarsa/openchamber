@@ -1,4 +1,4 @@
-import 'reflect-metadata';
+﻿import 'reflect-metadata';
 import express from 'express';
 import compression from 'compression';
 import path from 'path';
@@ -100,16 +100,18 @@ import {
 } from './lib/messenger/websocket.js';
 import { createRemoteClientAuthRuntime } from './lib/client-auth/remote-clients.js';
 import { createClientPairingRuntime } from './lib/client-auth/pairing.js';
-import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
 import { attachRealtimeProxy } from './lib/realtime-proxy.js';
 import { createRelayService } from './lib/relay/service.js';
 import { createRelayHostLock } from './lib/relay/host-lock.js';
 import { createAgentToolRuntime } from './lib/agent-tool/runtime.js';
+import { createBrowserControlBroker } from './lib/browser-control/broker.js';
+import { createDevServerScanner } from './lib/dev-servers/routes.js';
+import { createDevTunnelRuntime } from './lib/dev-tunnel/runtime.js';
+import { registerBrowserControlRoutes } from './lib/browser-control/routes.js';
 import { createSystemPromptRuntime } from './lib/system-prompt/runtime.js';
 import { createOpenChamberSessionService } from './lib/openchamber-sessions/routes.js';
 import { createScheduledTaskService } from './lib/scheduled-tasks/service.js';
 import { createOpenChamberControlService } from './lib/openchamber-control/service.js';
-import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
 import webPush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -404,7 +406,7 @@ const addOrUpdatePushSubscription = (...args) => pushRuntime.addOrUpdatePushSubs
 const removePushSubscription = (...args) => pushRuntime.removePushSubscription(...args);
 const sendPushToAllUiSessions = (...args) => pushRuntime.sendPushToAllUiSessions(...args);
 // Set once the notification trigger runtime exists (declared later). When a UI
-// client reports it became visible, reset the native push badge set — the same
+// client reports it became visible, reset the native push badge set â€” the same
 // moment the device zeroes its icon badge on becomeActive, keeping them in sync.
 let clearPendingPushBadge = () => {};
 const updateUiVisibility = (token, visible, platform) => {
@@ -748,7 +750,7 @@ const sessionGoalRuntime = createSessionGoalRuntime({
   getSmallModelService: async () => import('./lib/small-model/index.js'),
   emitGoalNotification: async ({ sessionId, directory, status, goal }) => {
     // The goal settle notification replaces the per-turn ready notifications
-    // (suppressed while the goal is active) — so it obeys the same toggle.
+    // (suppressed while the goal is active) â€” so it obeys the same toggle.
     const settings = await readSettingsFromDisk();
     if (settings.notifyOnCompletion === false) {
       return;
@@ -762,7 +764,7 @@ const sessionGoalRuntime = createSessionGoalRuntime({
     const objective = typeof goal?.objective === 'string' ? goal.objective.slice(0, 140) : '';
     const notificationPayload = {
       title,
-      body: [objective, detail].filter(Boolean).join(' — ').slice(0, 240),
+      body: [objective, detail].filter(Boolean).join(' â€” ').slice(0, 240),
       tag: `goal-${sessionId}`,
       kind: 'goal',
       sessionId,
@@ -1071,7 +1073,7 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   getActiveSessionCount,
   // Most-recently-used directories first: OpenCode initializes each directory
   // lazily on first request (seconds on large session stores), so the
-  // lifecycle warms these right after readiness — before the UI's first
+  // lifecycle warms these right after readiness â€” before the UI's first
   // interactive request would otherwise pay that cost.
   getWarmupDirectories: async () => {
     const settings = await readSettingsFromDiskMigrated().catch(() => null);
@@ -1089,11 +1091,28 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
     }
     return [...new Set(directories)];
   },
+  // A managed restart can move OpenCode to a NEW port (the old one may stay
+  // occupied by an orphaned process, e.g. killProcessOnPort is a no-op on
+  // Windows). Rebind the message-stream upstream readers to the current port
+  // so the UI keeps receiving events instead of staying pinned to the old
+  // process (#2638). The runtime is created later by the startup pipeline;
+  // by the time any restart runs, it is assigned.
+  onOpenCodeRestarted: () => {
+    try {
+      messageStreamRuntime?.rebindUpstream();
+    } catch (error) {
+      console.warn('Failed to rebind message stream after OpenCode restart:', error?.message ?? error);
+    }
+  },
   getManagedOpenCodeEnv: async () => {
     const settings = await readSettingsFromDiskMigrated().catch(() => null);
-    const managedEnv = settings?.agentControlToolEnabled === false
-      ? {}
-      : await (agentToolRuntime?.prepareManagedOpenCodeEnv() || {});
+    // Each capability is its own tool and its own switch; the plugin is only
+    // injected while at least one of them is on.
+    const includeControl = settings?.agentControlToolEnabled !== false;
+    const includeWeb = settings?.agentWebToolEnabled !== false;
+    const managedEnv = includeControl || includeWeb
+      ? await (agentToolRuntime?.prepareManagedOpenCodeEnv({ includeControl, includeWeb }) || {})
+      : {};
     if (settings?.optimizeSystemPrompt !== true) return managedEnv;
 
     const configContent = managedEnv.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT;
@@ -1185,6 +1204,37 @@ const openChamberSessionService = createOpenChamberSessionService({
   waitForOpenCodeReady,
   emitSessionCreatedEvent,
 });
+// Browser actions are published to whichever OpenChamber clients are connected;
+// the one owning the browser panel answers. `emitRequest` returns the number of
+// clients reached so the broker can fail fast when nobody is listening.
+const browserControlBroker = createBrowserControlBroker({
+  createId: () => `browser-${crypto.randomUUID()}`,
+  emitRequest: (request) => {
+    // Opening a page only needs a panel to open it in; everything else needs a
+    // client that can actually drive one. Counting the right clients is what
+    // lets the broker say "not here" instead of timing out.
+    const needsBrowserView = request.action !== 'browser.open';
+    let delivered = 0;
+    for (const client of uiOpenChamberEventClients) {
+      if (needsBrowserView && client.openchamberBrowserCapable !== true) continue;
+      try {
+        writeSseEvent(client, {
+          type: 'openchamber:browser-control-request',
+          properties: {
+            requestId: request.requestId,
+            action: request.action,
+            parameters: request.parameters,
+          },
+        });
+        delivered += 1;
+      } catch {
+        uiOpenChamberEventClients.delete(client);
+      }
+    }
+    return delivered;
+  },
+});
+
 const openChamberControlService = createOpenChamberControlService({
   readSettingsFromDiskMigrated,
   sanitizeProjects,
@@ -1193,6 +1243,7 @@ const openChamberControlService = createOpenChamberControlService({
   waitForOpenCodeReady,
   sessionService: openChamberSessionService,
   scheduledTaskService,
+  browserControl: browserControlBroker,
 });
 
 const messageQueueRuntime = createMessageQueueRuntime({
@@ -1327,8 +1378,8 @@ async function main(options = {}) {
   });
 
   // Pairing transports advertised to the create-device dialog. LAN reachability is
-  // derived from the SERVER's actual bind (a wildcard bind → the machine's LAN IP;
-  // a specific non-loopback host → that host), NOT from how the UI was opened — so
+  // derived from the SERVER's actual bind (a wildcard bind â†’ the machine's LAN IP;
+  // a specific non-loopback host â†’ that host), NOT from how the UI was opened â€” so
   // "Local network" works even when the UI is opened on localhost, and is absent
   // when the server is only bound to loopback (a LAN link would not connect).
   // The IPv4 the requesting client actually reached this server on (if any).
@@ -1345,7 +1396,7 @@ async function main(options = {}) {
     const local = `http://127.0.0.1:${activePort}`;
     let lanHost = null;
     if (isNetworkExposedBindHost(effectiveBindHost)) {
-      // Prefer the address the client is ALREADY talking to us on — it is the
+      // Prefer the address the client is ALREADY talking to us on â€” it is the
       // one interface guaranteed to be routable from that client's network.
       // Interface scanning is only a fallback: on servers with virtual bridges
       // (docker0 etc.) the first non-internal IPv4 can be an address no other
@@ -1373,7 +1424,7 @@ async function main(options = {}) {
   };
   // ALL direct LAN URLs this server is currently reachable on, for the
   // candidates-refresh endpoint: the address the requesting client already
-  // reached us on first (guaranteed routable from its network — over the relay
+  // reached us on first (guaranteed routable from its network â€” over the relay
   // tunnel this is loopback and yields nothing), then every non-internal IPv4
   // interface. A client that paired while the machine had a different DHCP
   // lease uses this to replace its stale LAN candidate.
@@ -1394,7 +1445,7 @@ async function main(options = {}) {
           }
         }
       } catch {
-        // interface scan failure → whatever we already collected
+        // interface scan failure â†’ whatever we already collected
       }
     } else {
       const h = String(effectiveBindHost || '').toLowerCase();
@@ -1511,6 +1562,10 @@ async function main(options = {}) {
   // relay candidate lazily at request time, so a late-bound holder is enough.
   let relayServiceInstance = null;
 
+  // Same pattern for the tunnel runtime: created after the base routes so
+  // /api/system/info resolves port + tunnel URL lazily at request time.
+  let tunnelRuntimeContextHolder = null;
+
   const bootstrapResult = bootstrapRuntime.setupBaseRoutes(app, {
     process,
     openchamberVersion: OPENCHAMBER_VERSION,
@@ -1547,6 +1602,15 @@ async function main(options = {}) {
         apiOnly,
       };
     },
+    // Port this instance serves on and the active tunnel's public URL (if
+    // any), for /api/system/info. Resolved lazily because the tunnel runtime
+    // is created after these base routes are registered.
+    getServerPort: () => {
+      const activePort = tunnelRuntimeContextHolder?.getActivePort?.();
+      if (Number.isFinite(activePort) && activePort > 0) return activePort;
+      return Number.isFinite(port) && port > 0 ? port : null;
+    },
+    getTunnelUrl: () => tunnelRuntimeContextHolder?.tunnelService?.getPublicUrl?.() ?? null,
     verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
     tunnelAuthController,
@@ -1622,6 +1686,7 @@ async function main(options = {}) {
 
   const tunnelRuntimeContext = tunnelWiringRuntime.initialize(app, port);
   const { tunnelService, startTunnelWithNormalizedRequest } = tunnelRuntimeContext;
+  tunnelRuntimeContextHolder = tunnelRuntimeContext;
 
   // Private relay host service: config + management routes + host client
   // lifecycle. Loopback port comes from the same source the tunnel uses so
@@ -1645,18 +1710,26 @@ async function main(options = {}) {
     // Relay demand = any paired device or pending pairing session that uses the
     // relay transport. Drives the auto on/off lifecycle.
     hasRelayDemand: async () => {
-      const [pendingRelay, deviceRelay] = await Promise.all([
-        clientPairingRuntime.hasActiveRelaySession().catch(() => false),
-        remoteClientAuthRuntime.hasActiveRelayClients().catch(() => false),
+      // A store read failure must NOT masquerade as "no demand": reconcile
+      // persists enabled=false and severs paired devices. Any affirmative
+      // answer wins; otherwise a failed check aborts reconcile (throw) so the
+      // relay keeps its current state until a trustworthy read succeeds.
+      const [pendingRelay, deviceRelay] = await Promise.allSettled([
+        clientPairingRuntime.hasActiveRelaySession(),
+        remoteClientAuthRuntime.hasActiveRelayClients(),
       ]);
-      return pendingRelay || deviceRelay;
+      if (pendingRelay.status === 'fulfilled' && pendingRelay.value) return true;
+      if (deviceRelay.status === 'fulfilled' && deviceRelay.value) return true;
+      if (pendingRelay.status === 'rejected') throw pendingRelay.reason;
+      if (deviceRelay.status === 'rejected') throw deviceRelay.reason;
+      return false;
     },
   });
   relayServiceInstance = relayService;
   relayService.registerRoutes(app);
 
   // Linear issue-tracker integration: issue-triggered session starts,
-  // issue ↔ session links, and lifecycle status comments posted back to the
+  // issue â†” session links, and lifecycle status comments posted back to the
   // originating Linear issue. Sessions go through the shared OpenChamber
   // session service so defaults and validation match the web UI.
   const linearIntegrationRuntime = createLinearIntegrationRuntime({
@@ -1666,6 +1739,21 @@ async function main(options = {}) {
     ensureEventStream: () => ensureGlobalWatcherStarted(),
   });
   registerLinearRoutes(app, { runtime: linearIntegrationRuntime });
+  registerBrowserControlRoutes(app, { express, broker: browserControlBroker });
+  // One scanner backs both discovery and the tunnel allowlist, so a port the
+  // user can see is exactly a port the tunnel will dial.
+  const devServerScanner = createDevServerScanner({ spawn, platform: process.platform });
+  const listDevServers = () => devServerScanner.discover({
+    ownPorts: [port, openCodePort].filter((value) => Number.isInteger(value) && value > 0),
+  });
+  createDevTunnelRuntime({
+    server,
+    discoverDevServers: listDevServers,
+    uiAuthController,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+    logger: console,
+  });
 
   await featureRoutesRuntime.registerRoutes(app, {
     crypto,
@@ -1696,6 +1784,10 @@ async function main(options = {}) {
     buildOpenCodeUrl,
     getOpenCodeAuthHeaders,
     getOpenCodePort: () => openCodePort,
+    // Dev-server discovery must not offer OpenChamber's own listeners back to
+    // the user as something to preview.
+    getOwnPorts: () => [port, openCodePort].filter((value) => Number.isInteger(value) && value > 0),
+    devServerScanner,
     buildAugmentedPath,
     projectConfigRuntime,
     scheduledTasksRuntime,
@@ -1744,12 +1836,12 @@ async function main(options = {}) {
     startTunnelWithNormalizedRequest,
     refreshOpenCodeAfterConfigChange,
     // Mirroring (parts, permissions, questions, todos, title fallback) rides
-    // on the shared global event hub — start it when a listener starts so a
+    // on the shared global event hub â€” start it when a listener starts so a
     // headless server doesn't depend on a browser client connecting first.
     ensureEventStream: () => ensureGlobalWatcherStarted(),
   });
   app.use('/api/messenger', messengerRouter);
-  // Legacy aliases — same router, kept for in-flight clients / system skills.
+  // Legacy aliases â€” same router, kept for in-flight clients / system skills.
   app.use('/api/openchamber-agent/messenger', messengerRouter);
   app.use('/api/otto/messenger', messengerRouter);
 
@@ -1831,7 +1923,7 @@ async function main(options = {}) {
   // Install / refresh OpenChamber-managed system skills (e.g. create-project)
   // in the user skill dir so OpenCode sessions can load them natively. Runs
   // after the startup pipeline so the embedded API base URL uses the final
-  // bound port. Best-effort — a failure here must never block startup.
+  // bound port. Best-effort â€” a failure here must never block startup.
   try {
     const results = syncSystemSkills({
       apiBaseUrl: `http://127.0.0.1:${tunnelRuntimeContext.getActivePort() || port}`,
@@ -1863,7 +1955,7 @@ async function main(options = {}) {
       const settings = await readSettingsFromDiskMigrated();
       projects = sanitizeProjects(settings?.projects || []);
     } catch {
-      // ignore — defaults to empty
+      // ignore â€” defaults to empty
     }
 
     const resolveProject = () => {
@@ -1881,7 +1973,7 @@ async function main(options = {}) {
         const discordConfig = settings?.discord;
         if (discordConfig?.botToken) {
           if (discordConfig.listenerEnabled === false) {
-            console.log('[Discord] Listener disabled in saved config — skipping auto-start');
+            console.log('[Discord] Listener disabled in saved config â€” skipping auto-start');
             break;
           }
           const result = discordListener.start(discordConfig.botToken, {
@@ -1904,7 +1996,7 @@ async function main(options = {}) {
                 discord: { ...discordConfig, bridgeEnabled: true },
               });
             } catch {
-              // best-effort — live listener is already bridged
+              // best-effort â€” live listener is already bridged
             }
           }
           console.log(
@@ -1913,27 +2005,27 @@ async function main(options = {}) {
             '(connected=' + result?.connected + ')'
           );
           // The bridge needs the shared global event hub running to mirror
-          // OpenCode output into Discord — don't wait for a browser client.
+          // OpenCode output into Discord â€” don't wait for a browser client.
           void ensureGlobalWatcherStarted().catch((error) => {
             console.warn('[Discord] Global event watcher startup failed:', error?.message ?? error);
           });
-          break; // Success — exit retry loop
+          break; // Success â€” exit retry loop
         } else {
-          console.log('[Discord] No bot token in saved config — skipping auto-start');
+          console.log('[Discord] No bot token in saved config â€” skipping auto-start');
           break; // No token, nothing to retry
         }
       } catch (err) {
         const isLastAttempt = attempt === AUTO_START_RETRIES;
         console.warn(
           `[Discord] Auto-start attempt ${attempt}/${AUTO_START_RETRIES} failed:`, err?.message ?? err,
-          isLastAttempt ? ' — giving up' : ` — retrying in ${AUTO_START_RETRY_DELAY_MS}ms`,
+          isLastAttempt ? ' â€” giving up' : ` â€” retrying in ${AUTO_START_RETRY_DELAY_MS}ms`,
         );
         if (isLastAttempt) break;
         await new Promise((r) => setTimeout(r, AUTO_START_RETRY_DELAY_MS));
       }
     }
 
-    // Periodic health check — re-reads settings each tick so Disconnect /
+    // Periodic health check â€” re-reads settings each tick so Disconnect /
     // Stop listening are respected (never restart from a stale boot-time
     // closed-over config). Recovers only when listening is still enabled.
     const healthCheckTimer = setInterval(async () => {
@@ -1945,7 +2037,7 @@ async function main(options = {}) {
         if (cfg.listenerEnabled === false) {
           const status = discordListener.status(cfg.botToken);
           if (status.running) {
-            console.log('[Discord] Health check: listener disabled in settings — stopping');
+            console.log('[Discord] Health check: listener disabled in settings â€” stopping');
             discordListener.stop(cfg.botToken);
           }
           return;
@@ -1955,7 +2047,7 @@ async function main(options = {}) {
         if (!status.running || !status.connected) {
           console.log(
             '[Discord] Health check: listener not connected (running=' + status.running +
-            ', connected=' + status.connected + ') — restarting...'
+            ', connected=' + status.connected + ') â€” restarting...'
           );
           discordListener.stop(cfg.botToken);
           const startResult = discordListener.start(cfg.botToken, {
@@ -1970,7 +2062,7 @@ async function main(options = {}) {
             guildPolicies: cfg.guildPolicies,
           });
           console.log(
-            '[Discord] Health check: restart result — running=' + startResult.running +
+            '[Discord] Health check: restart result â€” running=' + startResult.running +
             ', connected=' + startResult.connected
           );
         }
@@ -1982,7 +2074,7 @@ async function main(options = {}) {
   })();
 
   // Resume Linear integration watchers (label-trigger polling and lifecycle
-  // status comments) from persisted state. Best-effort — a failure here must
+  // status comments) from persisted state. Best-effort â€” a failure here must
   // never block startup.
   try {
     linearIntegrationRuntime.start();
@@ -2022,7 +2114,7 @@ async function main(options = {}) {
       const managed = Boolean((openCodeProcess || openCodePort) && !ENV_SKIP_OPENCODE_START && !isExternalOpenCode);
       // Only ever expose pid/port for a server WE manage. The Electron-side
       // killer kills by port (lsof + kill -KILL), so returning a port we don't
-      // own — e.g. an external/desktop OpenCode on 4096 we attached to — would
+      // own â€” e.g. an external/desktop OpenCode on 4096 we attached to â€” would
       // let a single miscomputed `managed` flag take down the user's separate
       // server. Structurally withhold what isn't ours so the killer has no
       // target, instead of relying on the flag check alone.

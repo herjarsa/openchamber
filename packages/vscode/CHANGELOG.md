@@ -1,3 +1,35 @@
+## [Unreleased]
+
+- **Chat images:** completed assistant replies now collect Markdown images into a compact gallery with thumbnails and full-screen previews, including workspace-local images across multi-root workspaces (thanks to @ChangeHow).
+- **Sessions:** switching projects now selects a session owned by the new workspace, and a message already being prepared stays with the session where it was submitted instead of being rerouted by a later project switch (thanks to @makeittech).
+- Usage: quota limits enabled for display now refresh every three minutes, with a manual refresh action available at any time.
+- Chat: typing `!` to enter shell mode no longer inserts the trigger into the command or moves the caret to the wrong side of it (thanks to @RyderAsKing).
+- Chat: line numbers with three or more digits no longer wrap in code blocks (thanks to @ChangeHow).
+
+## [1.18.2] - 2026-08-10
+
+- **Settings:** OpenCode configuration changes now accumulate behind a single Apply & Restart action instead of restarting OpenCode after every edit; the confirmation warns when active chats will be stopped (thanks to @makeittech).
+- Chat: messages submitted before switching sessions stay with the session and workspace they were sent from, and are cancelled rather than crossing into a different runtime (thanks to @Wsyjq).
+- Chat: queued messages no longer send into a response that is still streaming, and tool cards left running by an interrupted response settle instead of remaining stuck (thanks to @makeittech).
+- Chat: shell command output is expanded by default, and adding a message to context returns focus to the composer (thanks to @pascalandr, @makeittech).
+- Chat: fresh messages no longer replay their entry animation after they have already been shown (thanks to @makeittech).
+- Chat: the composer caret is now easier to see.
+- MCP: authorization now handles browser callbacks more reliably, settings distinguish available and unavailable servers more clearly, and failed connections expose a retry action.
+- Usage: added xAI quota reporting (thanks to @iamhenry).
+- Attachments: removing an attached Office or OpenDocument file also removes the images extracted from that document (thanks to @chiamsun).
+- Notebooks: notebook links now open in the notebook editor when a compatible extension is installed (thanks to @TTTPOB).
+- Settings: rapid edits to notification templates no longer overwrite one another, and the collapsed-user-message preference now persists correctly (thanks to @AmanTahiliani, @pascalandr).
+- Security: updated archive extraction to address GHSA-xcpc-8h2w-3j85 (thanks to @mel0nyrame).
+- UI: dialogs, dropdowns, popovers, and tooltips now use consistent glass styling.
+
+## [1.18.1] - 2026-08-04
+
+- **Providers:** signing in to an OAuth-only provider (such as Cursor) now completes in the browser — the login is stored and the provider updates instead of remaining signed out. OAuth-only providers show a Connect flow instead of an API key form, and their models stay hidden until you are signed in.
+- **Sessions:** archived sessions can now be restored to the active list — from the sidebar context menu, the archived-sessions page, or the bulk-selection bar (thanks to @makeittech).
+- Providers: sign-ins that need extra details (such as GitHub Copilot Enterprise) now ask for them before opening the browser, and device codes come with a working copy button.
+- Chat: a manually chosen model now stays selected after a delegated subtask finishes, instead of reverting to the agent's default model.
+- Chat: Ctrl/Cmd+L now adds the selected text to the chat input, or focuses it when nothing is selected.
+
 ## [1.18.0] - 2026-08-04
 
 - **Providers:** custom OpenAI-compatible providers can now be added and edited from Settings, including their endpoint, models, credentials, headers, and configuration scope (thanks to @makeittech).
