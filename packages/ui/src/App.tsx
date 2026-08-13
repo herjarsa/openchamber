@@ -111,6 +111,7 @@ type EmbeddedSessionChatConfig = {
   sessionId: string;
   directory: string | null;
   readOnly: boolean;
+  allowPromptingSubagentSessions?: boolean;
 };
 
 type EmbeddedVisibilityPayload = {
@@ -143,6 +144,9 @@ const readEmbeddedSessionChatConfig = (): EmbeddedSessionChatConfig | null => {
     sessionId,
     directory,
     readOnly: params.get('readOnly') === '1' || params.get('readOnly') === 'true',
+    allowPromptingSubagentSessions: params.has('allowPromptingSubagentSessions')
+      ? params.get('allowPromptingSubagentSessions') === '1'
+      : undefined,
   };
 };
 
@@ -204,7 +208,11 @@ const EmbeddedSessionChatContent: React.FC<{
     <>
       <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
       <OpenCodeUpdateToast />
-      <ChatView readOnly={embeddedSessionChat.readOnly} />
+      <ChatView
+        active={embeddedBackgroundWorkEnabled}
+        readOnly={embeddedSessionChat.readOnly}
+        initialAllowPromptingSubagentSessions={embeddedSessionChat.allowPromptingSubagentSessions}
+      />
       <Toaster />
     </>
   );
@@ -233,7 +241,10 @@ function App({ apis }: AppProps) {
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
   const refreshGitHubAuthStatus = useGitHubAuthStore((state) => state.refreshStatus);
   const [isVSCodeRuntime, setIsVSCodeRuntime] = React.useState<boolean>(() => apis.runtime.isVSCode);
-  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(true);
+  // Embedded chats start inactive until the parent panel identifies the active
+  // tab. Otherwise a newly loaded background tab can focus its composer first
+  // and steal keyboard input from the main chat.
+  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(false);
   const [initRetryExhausted, setInitRetryExhausted] = React.useState(false);
   const [initRetryEpoch, setInitRetryEpoch] = React.useState(0);
   const [runtimeEndpointEpoch, setRuntimeEndpointEpoch] = React.useState(0);
