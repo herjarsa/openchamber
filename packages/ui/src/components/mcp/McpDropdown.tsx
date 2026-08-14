@@ -21,6 +21,9 @@ import { computeMcpHealth, useMcpStore } from '@/stores/useMcpStore';
 import { McpIcon } from '@/components/icons/McpIcon';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
+import { toast } from 'sonner';
+import { startMcpAuthorization } from '@/components/sections/mcp/startMcpAuthorization';
+
 
 
 /**
@@ -259,10 +262,26 @@ export const McpDropdownContent = React.memo<McpDropdownContentProps>(function M
                   setBusyName(serverName);
                   try {
                     if (checked) {
+                      // Reconnecting a server that is waiting on authorization
+                      // just repeats the attempt that produced `needs_auth`;
+                      // the user has to visit the provider first.
+                      const entryStatus = status?.[serverName]?.status;
+                      if (entryStatus === 'needs_auth' || entryStatus === 'needs_client_registration') {
+                        const { opened } = await startMcpAuthorization({
+                          name: serverName,
+                          directory,
+                        });
+                        if (!opened) {
+                          toast.error(t('mcpDropdown.toast.authorizeOpenFailed'));
+                        }
+                        return;
+                      }
                       await connect(serverName, directory);
                     } else {
                       await disconnect(serverName, directory);
                     }
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : t('mcpDropdown.toast.authorizeFailed'));
                   } finally {
                     setBusyName(null);
                   }
