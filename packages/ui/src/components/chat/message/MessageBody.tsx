@@ -56,6 +56,7 @@ import {
 import { isEmbeddedSessionChat } from '@/components/layout/contextPanelEmbeddedChat';
 import { useProviderLogo } from '@/hooks/useProviderLogo';
 import { getAgentColor } from '@/lib/agentColors';
+import { isCapacitorMobileApp } from '@/apps/mobileNativeChrome';
 
 
 const CONTAIN_LAYOUT_STYLE = { contain: 'layout' as const, transform: 'translateZ(0)' };
@@ -1617,6 +1618,13 @@ const AssistantMessageBody = React.memo(({
                         }
                         throw new Error(payload.error || 'Failed to save image in VS Code');
                     }
+                } else if (isCapacitorMobileApp()) {
+                    const blob = await fetch(dataUrl).then((response) => response.blob());
+                    const file = new File([blob], fileName, { type: blob.type || 'image/png' });
+                    if (!navigator.canShare?.({ files: [file] })) {
+                        throw new Error('Image sharing is unavailable in this mobile runtime');
+                    }
+                    await navigator.share({ files: [file] });
                 } else {
                     const link = document.createElement('a');
                     link.download = fileName;
@@ -1868,7 +1876,6 @@ const AssistantMessageBody = React.memo(({
                             chatRenderMode={chatRenderMode}
                             onContentChange={onContentChange}
                             onShowPopup={onShowPopup}
-                            enableMarkdownImages={isMessageCompleted}
                         />
                     </div>
                 );
@@ -2023,7 +2030,6 @@ const AssistantMessageBody = React.memo(({
         collapsedPreviewCount,
         expandedTools,
         isMobile,
-        isMessageCompleted,
         isActivityOwnerMessage,
         isSortedRenderMode,
         lastRenderableTextPartIndex,
@@ -2236,6 +2242,8 @@ const AssistantMessageBody = React.memo(({
                 </div>
                 <MessageFilesDisplay files={parts} onShowPopup={onShowPopup} />
                 <MarkdownImageGallery
+                    sessionId={sessionId}
+                    messageId={messageId}
                     contents={finalizedAssistantMarkdownContents}
                     onShowPopup={onShowPopup}
                 />
