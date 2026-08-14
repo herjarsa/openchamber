@@ -44,9 +44,9 @@ export const resolveManagedOpenCodeCwd = ({ env, homedir }) => {
       warnedAboutHomeFallback = true;
       // eslint-disable-next-line no-console
       console.warn(
-        `[openchamber] cwd ${cwd} does not look like a project root; ` +
-          `falling back to home (${home}). ` +
-          `Set OPENCHAMBER_OPENCODE_CWD to silence this warning.`,
+        `[openchamber] managed OpenCode cwd is the launch directory (${cwd}), which is not a project root; ` +
+          `using home (${home}) as the managed working directory instead. ` +
+          `Set OPENCHAMBER_OPENCODE_CWD to pick a specific directory.`,
       );
     }
     return home;

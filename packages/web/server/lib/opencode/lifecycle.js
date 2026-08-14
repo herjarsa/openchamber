@@ -85,6 +85,17 @@ const classifyHealthProbeError = (error) => {
   return { class: 'error', detail: getHealthFailureDetail(error) };
 };
 
+// Pure resolution of the default scoped config dir for the managed server.
+// Exported for tests; production callers pass the real env/fs.
+const resolveDefaultManagedConfigDir = ({ platform = process.platform, appData = process.env.APPDATA, homedir = os.homedir, existsSyncFn = existsSync } = {}) => {
+  if (platform !== 'win32') return null;
+  const base = appData || path.join(homedir(), '.config');
+  const candidate = path.join(base, 'openchamber', 'managed-config');
+  return existsSyncFn(path.join(candidate, 'opencode.jsonc')) ? candidate : null;
+};
+
+export { resolveDefaultManagedConfigDir };
+
 export const createOpenCodeLifecycleRuntime = (deps) => {
   const {
     state,
@@ -684,13 +695,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     const managedConfigDir = (() => {
       const override = process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
       if (override) return override;
-      // Default: a scoped config dir shipped next to the app's own data dir.
-      // Only injected when it actually exists, so a stock install keeps using
-      // the user's global config without any behavior change.
-      if (process.platform !== 'win32') return null;
-      const base = process.env.APPDATA || path.join(os.homedir(), '.config');
-      const candidate = path.join(base, 'openchamber', 'managed-config');
-      return existsSync(path.join(candidate, 'opencode.jsonc')) ? candidate : null;
+      // Never clobber a user-provided OPENCODE_CONFIG_DIR with the default.
+      if (process.env.OPENCODE_CONFIG_DIR) return null;
+      return resolveDefaultManagedConfigDir();
     })();
     recordStartupPerformance('opencode.environment.ready', {
       attempt,

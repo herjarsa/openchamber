@@ -1,15 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 
-vi.mock('node:fs', () => ({
-  existsSync: vi.fn(),
+mock.module('node:fs', () => ({
+  existsSync: mock(() => false),
 }));
 
-import { existsSync } from 'node:fs';
-
-import {
-  __resetCwdFallbackWarning,
-  resolveManagedOpenCodeCwd,
-} from './opencode-cwd.mjs';
+const { existsSync } = await import('node:fs');
+const { __resetCwdFallbackWarning, resolveManagedOpenCodeCwd } = await import('./opencode-cwd.mjs');
 
 describe('resolveManagedOpenCodeCwd', () => {
   let cwdSpy;
@@ -17,14 +13,14 @@ describe('resolveManagedOpenCodeCwd', () => {
 
   beforeEach(() => {
     __resetCwdFallbackWarning();
-    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/Users/example');
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    cwdSpy = spyOn(process, 'cwd').mockReturnValue('/Users/example');
+    warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     cwdSpy.mockRestore();
     warnSpy.mockRestore();
-    vi.resetAllMocks();
+    mock.restore();
   });
 
   it('defaults managed OpenCode cwd to the user home directory', () => {
@@ -69,7 +65,7 @@ describe('resolveManagedOpenCodeCwd', () => {
       resolveManagedOpenCodeCwd({ env: {}, homedir: () => '/Users/example' }),
     ).toBe('/Users/example');
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toContain('does not look like a project root');
+    expect(warnSpy.mock.calls[0][0]).toContain('which is not a project root');
   });
 
   it('suppresses the home-fallback warning on subsequent calls', () => {

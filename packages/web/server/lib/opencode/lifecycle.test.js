@@ -783,21 +783,86 @@ describe('OpenCode lifecycle', () => {
   it('does not inject OPENCODE_CONFIG_DIR when no managed config dir exists', async () => {
     delete process.env.OPENCODE_BINARY;
     delete process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
-    const child = createMockChild();
-    spawnMock.mockImplementationOnce(() => {
-      queueMicrotask(() => {
-        child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+    const previousAppData = process.env.APPDATA;
+    process.env.APPDATA = 'C:\\NoSuchDir';
+    try {
+      const child = createMockChild();
+      spawnMock.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+        });
+        return child;
       });
-      return child;
-    });
 
-    const runtime = createRuntime();
-    const server = await runtime.startOpenCode();
-    const [, , options] = spawnMock.mock.calls[0];
+      const runtime = createRuntime();
+      const server = await runtime.startOpenCode();
+      const [, , options] = spawnMock.mock.calls[0];
 
-    expect(options.env.OPENCODE_CONFIG_DIR).toBeUndefined();
+      expect(options.env.OPENCODE_CONFIG_DIR).toBeUndefined();
 
-    await server.close();
+      await server.close();
+    } finally {
+      if (typeof previousAppData === 'string') {
+        process.env.APPDATA = previousAppData;
+      } else {
+        delete process.env.APPDATA;
+      }
+    }
+  });
+  it('does not override a user-provided OPENCODE_CONFIG_DIR with the default', async () => {
+    delete process.env.OPENCODE_BINARY;
+    delete process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
+    const previous = process.env.OPENCODE_CONFIG_DIR;
+    process.env.OPENCODE_CONFIG_DIR = '/user/config-dir';
+    try {
+      const child = createMockChild();
+      spawnMock.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+        });
+        return child;
+      });
+
+      const runtime = createRuntime();
+      const server = await runtime.startOpenCode();
+      const [, , options] = spawnMock.mock.calls[0];
+
+      expect(options.env.OPENCODE_CONFIG_DIR).toBe('/user/config-dir');
+
+      await server.close();
+    } finally {
+      if (typeof previous === 'string') {
+        process.env.OPENCODE_CONFIG_DIR = previous;
+      } else {
+        delete process.env.OPENCODE_CONFIG_DIR;
+      }
+    }
+  });
+
+  it('resolveDefaultManagedConfigDir only resolves on win32 with an existing opencode.jsonc', async () => {
+    const { resolveDefaultManagedConfigDir } = await import('./lifecycle.js');
+    const existsSyncMock = vi.fn((p) => p === 'C:\\AppData\\openchamber\\managed-config\\opencode.jsonc');
+
+    expect(resolveDefaultManagedConfigDir({
+      platform: 'linux',
+      appData: 'C:\\AppData',
+      homedir: () => '/home/user',
+      existsSyncFn: existsSyncMock,
+    })).toBeNull();
+
+    expect(resolveDefaultManagedConfigDir({
+      platform: 'win32',
+      appData: 'C:\\AppData',
+      homedir: () => '/home/user',
+      existsSyncFn: existsSyncMock,
+    })).toBe('C:\\AppData\\openchamber\\managed-config');
+
+    expect(resolveDefaultManagedConfigDir({
+      platform: 'win32',
+      appData: undefined,
+      homedir: () => '/home/user',
+      existsSyncFn: vi.fn(() => false),
+    })).toBeNull();
   });
 
   it('does not retry managed startup when the configured OpenCode binary is invalid', async () => {
