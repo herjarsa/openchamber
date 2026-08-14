@@ -166,11 +166,6 @@ the user's global config. UI config edits that write to the user global layer
 (providers/agents/MCP) are therefore not visible to the managed server until
 mirrored into the scoped config — an intentional tradeoff for a lean managed
 runtime.
-runtime. PATH and `OPENCODE_SERVER_PASSWORD` remain lifecycle-owned and cannot
-be replaced by injected values. External OpenCode processes receive no
-OpenChamber tool injection. Managed launch env strips AppImage `ARGV0` before
-spawn so zsh-backed OpenCode tools do not rewrite child argv[0] to the AppImage
-path (#2588).
 
 Before spawn, `applyProviderEnvAliases` fills unset Google credential aliases
 from any present sibling (`GOOGLE_GENERATIVE_AI_API_KEY`, `GOOGLE_API_KEY`,
