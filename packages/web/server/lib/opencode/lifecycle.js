@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { stripAppImageArgv0Leak } from '../inherited-env.js';
 import { registerManagedProcess, unregisterManagedProcess, reapOrphanedProcesses } from './managed-process-registry.js';
 import { applyProviderEnvAliases } from './provider-env-aliases.js';
@@ -678,8 +681,17 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     // Optional scoped config dir for the managed server (e.g. a lean config that
     // avoids heavy plugins/daemons which can starve the managed event loop).
     // Explicit env override wins; otherwise no var is injected and the managed
-    // server keeps using the user's global config as before.
-    const managedConfigDir = process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR || null;
+    const managedConfigDir = (() => {
+      const override = process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
+      if (override) return override;
+      // Default: a scoped config dir shipped next to the app's own data dir.
+      // Only injected when it actually exists, so a stock install keeps using
+      // the user's global config without any behavior change.
+      if (process.platform !== 'win32') return null;
+      const base = process.env.APPDATA || path.join(os.homedir(), '.config');
+      const candidate = path.join(base, 'openchamber', 'managed-config');
+      return existsSync(path.join(candidate, 'opencode.jsonc')) ? candidate : null;
+    })();
     recordStartupPerformance('opencode.environment.ready', {
       attempt,
       durationMs: performance.now() - phaseStartedAt,
