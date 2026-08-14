@@ -235,7 +235,7 @@ describe('OpenCode lifecycle', () => {
     await runtime.triggerHealthCheck();
 
     expect(warn).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('(2/20)'));
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('(2/40)'));
     warn.mockRestore();
   });
 
@@ -314,7 +314,7 @@ describe('OpenCode lifecycle', () => {
 
     expect(close).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('(1/20)'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('(1/40)'));
     warn.mockRestore();
   });
 
@@ -749,6 +749,55 @@ describe('OpenCode lifecycle', () => {
 
     await expect(runtime.startOpenCode()).rejects.toThrow('OpenCode process exited before serving with signal SIGTERM. Binary used: opencode. No stdout/stderr captured');
     expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('injects OPENCODE_CONFIG_DIR into the managed OpenCode launch env when the override env var is set', async () => {
+    delete process.env.OPENCODE_BINARY;
+    const previousOverride = process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
+    process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR = '/tmp/managed-config';
+    try {
+      const child = createMockChild();
+      spawnMock.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+        });
+        return child;
+      });
+
+      const runtime = createRuntime();
+      const server = await runtime.startOpenCode();
+      const [, , options] = spawnMock.mock.calls[0];
+
+      expect(options.env.OPENCODE_CONFIG_DIR).toBe('/tmp/managed-config');
+
+      await server.close();
+    } finally {
+      if (typeof previousOverride === 'string') {
+        process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR = previousOverride;
+      } else {
+        delete process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
+      }
+    }
+  });
+
+  it('does not inject OPENCODE_CONFIG_DIR when no managed config dir exists', async () => {
+    delete process.env.OPENCODE_BINARY;
+    delete process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR;
+    const child = createMockChild();
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        child.stdout.emit('data', 'opencode server listening on http://127.0.0.1:45678\n');
+      });
+      return child;
+    });
+
+    const runtime = createRuntime();
+    const server = await runtime.startOpenCode();
+    const [, , options] = spawnMock.mock.calls[0];
+
+    expect(options.env.OPENCODE_CONFIG_DIR).toBeUndefined();
+
+    await server.close();
   });
 
   it('does not retry managed startup when the configured OpenCode binary is invalid', async () => {

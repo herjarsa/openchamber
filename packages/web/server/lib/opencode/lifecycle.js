@@ -675,6 +675,11 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       ? getManagedOpenCodeShellEnvSnapshot() || {}
       : {};
     const managedOpenCodeEnv = await getManagedOpenCodeEnv();
+    // Optional scoped config dir for the managed server (e.g. a lean config that
+    // avoids heavy plugins/daemons which can starve the managed event loop).
+    // Explicit env override wins; otherwise no var is injected and the managed
+    // server keeps using the user's global config as before.
+    const managedConfigDir = process.env.OPENCHAMBER_OPENCODE_CONFIG_DIR || null;
     recordStartupPerformance('opencode.environment.ready', {
       attempt,
       durationMs: performance.now() - phaseStartedAt,
@@ -693,6 +698,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
           ...shellEnv,
           ...process.env,
           ...managedOpenCodeEnv,
+          ...(managedConfigDir ? { OPENCODE_CONFIG_DIR: managedConfigDir } : {}),
           PATH: envPath,
           OPENCODE_SERVER_PASSWORD: openCodePassword,
         })),
