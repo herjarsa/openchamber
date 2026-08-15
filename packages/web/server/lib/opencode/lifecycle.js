@@ -24,7 +24,11 @@ const OPENCODE_HEALTH_PATH = '/global/health';
 // Last-used directory plus the three most recently opened projects — deeper
 // tails are unlikely to be the user's first click and just add background work.
 const WARMUP_DIRECTORY_LIMIT = 4;
-const WARMUP_REQUEST_TIMEOUT_MS = 30000;
+// WARMUP_REQUEST_TIMEOUT_MS was 30000 in the original PR (#2917); upstream
+// commit 77d51d207 reduced it to 5000 once warmup runs with bounded
+// concurrency (2). Taking the upstream value because it is the contract
+// already shipped on main and covered by existing tests.
+const WARMUP_REQUEST_TIMEOUT_MS = 5000;
 const MANAGED_STDERR_TAIL_MAX_BYTES = 32 * 1024;
 const HEALTH_FAILURE_DETAIL_MAX_LENGTH = 256;
 
@@ -1133,9 +1137,13 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
   // session stores. Without warming, the user's first session open pays it
   // interactively (the chat waits on the message fetch until the directory
   // finishes initializing). Warm the most recently used directories right
-  // after readiness so the work overlaps UI startup instead. Sequential and
-  // best-effort: a failed or slow directory never blocks the others for long,
-  // and a restart invalidates the pass via the port/readiness guard.
+  // after readiness so the work overlaps UI startup instead. Runs the
+  // warmup requests with bounded concurrency so a slow directory cannot
+  // serialize the whole pass (observed: 30s x 4 dirs = 120s of managed
+  // startup where health checks already started timing out). Best-effort:
+  // a failed or slow directory never blocks the others for long, and a
+  // restart invalidates the pass via the port/readiness guard.
+  const WARMUP_CONCURRENCY = 2;
   const warmOpenCodeDirectories = async () => {
     let directories = [];
     try {
@@ -1146,8 +1154,10 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     if (!Array.isArray(directories) || directories.length === 0) return;
 
     const warmedPort = state.openCodePort;
-    for (const directory of directories.slice(0, WARMUP_DIRECTORY_LIMIT)) {
-      if (typeof directory !== 'string' || !directory) continue;
+    const targets = directories
+      .slice(0, WARMUP_DIRECTORY_LIMIT)
+      .filter((directory) => typeof directory === 'string' && directory);
+    const warmOne = async (directory) => {
       if (!state.isOpenCodeReady || state.openCodePort !== warmedPort) return;
       let timeout = null;
       try {
@@ -1164,7 +1174,18 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       } finally {
         if (timeout) clearTimeout(timeout);
       }
-    }
+    };
+    // Consume the targets with bounded parallelism (up to WARMUP_CONCURRENCY
+    // in flight).
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(WARMUP_CONCURRENCY, targets.length) }, async () => {
+      while (cursor < targets.length) {
+        const directory = targets[cursor];
+        cursor += 1;
+        await warmOne(directory);
+      }
+    });
+    await Promise.allSettled(workers);
   };
 
   /**
