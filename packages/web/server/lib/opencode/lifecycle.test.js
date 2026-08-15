@@ -863,6 +863,15 @@ describe('OpenCode lifecycle', () => {
       homedir: () => '/home/user',
       existsSyncFn: vi.fn(() => false),
     })).toBeNull();
+
+    // Fallback to homedir + .config when APPDATA is null (not merely undefined,
+    // which triggers the default param and reads the real env APPDATA).
+    expect(resolveDefaultManagedConfigDir({
+      platform: 'win32',
+      appData: null,
+      homedir: () => 'C:\\Users\\test',
+      existsSyncFn: vi.fn(() => true),
+    })).toBe('C:\\Users\\test\\.config\\openchamber\\managed-config');
   });
 
   it('does not retry managed startup when the configured OpenCode binary is invalid', async () => {
