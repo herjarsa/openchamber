@@ -1,3 +1,6 @@
+import { discordIntegrationI18n } from './discord-integration.i18n';
+import { linearIntegrationI18n } from './linear-integration.i18n';
+import { thirdPartyIntegrationI18n } from './third-party-integrations.i18n';
 export const settingsDict = {
   'settings.providers.page.openCodeGo.title': 'OpenCode Go Nutzungsverfolgung',
   'settings.providers.page.openCodeGo.description': 'Verbinden Sie das OpenCode Go Dashboard, um rollierenden, wöchentlichen und monatlichen Verbrauch anzuzeigen.',
@@ -1130,6 +1133,7 @@ export const settingsDict = {
   'settings.usage.page.header.providerUsage': '{provider} Nutzung',
   'settings.usage.page.header.refreshing': 'Aktualisiere Nutzung...',
   'settings.usage.page.header.lastUpdated': 'Zuletzt aktualisiert: {time}',
+  'settings.usage.page.header.lastUpdatedWithPlan': 'Tarif: {plan} · Zuletzt aktualisiert: {time}',
   'settings.usage.page.options.showInWorkStatusAria': 'Im Arbeitsstatusbereich anzeigen',
   'settings.usage.page.options.showInWorkStatus': 'Im Arbeitsstatusbereich anzeigen',
   'settings.usage.page.options.showInWorkStatusTooltip': 'Wenn aktiviert, ist die Nutzung dieses Anbieters im Arbeitsstatusbereich sichtbar.',
@@ -1256,6 +1260,7 @@ export const settingsDict = {
   'settings.openchamber.worktrees.list.loading': 'Worktrees werden geladen...',
   'settings.openchamber.worktrees.list.empty': 'Keine Worktrees für dieses Projekt gefunden',
   'settings.openchamber.worktrees.list.detachedHead': 'Detached HEAD',
+  'settings.openchamber.worktrees.list.openInDiscord': 'In Discord öffnen',
   'settings.openchamber.worktrees.list.deleteWorktreeAria': 'Worktree {name} löschen',
   'settings.agents.modelSelector.title': 'Modell auswählen',
   'settings.agents.modelSelector.searchPlaceholder': 'Modelle durchsuchen',
@@ -2124,4 +2129,7 @@ export const settingsDict = {
   'settings.openchamber.visual.option.themeMode.light.description': 'Immer helles Erscheinungsbild verwenden',
   'settings.openchamber.visual.option.themeMode.dark.description': 'Immer dunkles Erscheinungsbild verwenden',
   'chat.message.userText.collapseAria': 'Benutzernachricht einklappen',
+  ...discordIntegrationI18n.de,
+  ...linearIntegrationI18n.de,
+  ...thirdPartyIntegrationI18n.de,
 };
