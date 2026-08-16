@@ -1,7 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('node:fs', () => ({
-  existsSync: vi.fn(),
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';mock.module('node:fs', () => ({
+  existsSync: mock(() => false),
 }));
 
 import { existsSync } from 'node:fs';
@@ -17,14 +15,13 @@ describe('resolveManagedOpenCodeCwd', () => {
 
   beforeEach(() => {
     __resetCwdFallbackWarning();
-    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/Users/example');
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    cwdSpy = spyOn(process, 'cwd').mockReturnValue('/Users/example');
+    warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     cwdSpy.mockRestore();
     warnSpy.mockRestore();
-    vi.resetAllMocks();
   });
 
   it('defaults managed OpenCode cwd to the user home directory', () => {
@@ -75,7 +72,6 @@ describe('resolveManagedOpenCodeCwd', () => {
   it('suppresses the home-fallback warning on subsequent calls', () => {
     cwdSpy.mockReturnValue('/Users/example');
     existsSync.mockReturnValue(false);
-    resolveManagedOpenCodeCwd({ env: {}, homedir: () => '/Users/example' });
     resolveManagedOpenCodeCwd({ env: {}, homedir: () => '/Users/example' });
     resolveManagedOpenCodeCwd({ env: {}, homedir: () => '/Users/example' });
     expect(warnSpy).toHaveBeenCalledTimes(1);
