@@ -1,4 +1,4 @@
-import type { SidebarSection } from '@/constants/sidebar';
+﻿import type { SidebarSection } from '@/constants/sidebar';
 import type { IconName } from '@/components/icon/icons';
 
 export type SettingsPageSlug =
@@ -202,7 +202,7 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
   { slug: 'voice', title: 'Voice', group: 'general', kind: 'single', keywords: ['tts', 'speech', 'voice'], isAvailable: (ctx) => !ctx.isVSCode },
   { slug: 'tunnel', title: 'External Tunnel', group: 'projects', kind: 'single', keywords: ['tunnel', 'external', 'cloudflare', 'qr', 'remote', 'mobile', 'share'], isAvailable: (ctx) => !ctx.isVSCode },
   { slug: 'about', title: 'About', group: 'general', kind: 'single', keywords: ['about', 'version', 'updates', 'release', 'changelog'], isAvailable: (ctx) => ctx.isMobile && !ctx.isVSCode },
-  { slug: 'integrations', title: 'Integrations', group: 'general', kind: 'single', keywords: ['integration', 'discord', 'messenger', 'slack', 'chat', 'connect', 'jira', 'atlassian', 'issue', 'tracker'] },
+  { slug: 'integrations', title: 'Integrations', group: 'general', kind: 'single', keywords: ['integration', 'plugin', 'provider', 'oauth', 'claude', 'cursor', 'command code', 'connect', 'discord', 'telegram', 'messenger', 'slack', 'chat', 'jira', 'atlassian', 'issue', 'tracker'] },
 ] as const;
 
 const LEGACY_SIDEBAR_SECTION_TO_SETTINGS_SLUG: Record<SidebarSection, SettingsPageSlug> = {
@@ -287,6 +287,9 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
 
     case 'git':
       return 'git-branch';
+
+    case 'integrations':
+      return 'plug';
 
     case 'usage':
       return 'bar-chart-2';
