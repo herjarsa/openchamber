@@ -9,10 +9,11 @@
 ## Fases
 1. [DONE] Wave0: auditoría (procesos, DB, logs, fork, proxy).
 2. [DONE] Wave2: poda backups (11.5+1.6+1.7GB) + magic-context 131MB + session_diff >20MB (238MB) + prune events (67K→49K, 3.93→3.69GB). Script prune reparado (bloque duplicado, línea truncada).
-3. [TODO] Wave4: rebuild dist-bundle/main.mjs desde fork HEAD + repack app.asar + sync packages/web → app.asar.unpacked/@openchamber/web.
-4. [TODO] Wave3: relanzar OpenChamber; verificar /session + PushWatcher + ausencia de 4x MCP.
-5. [TODO] Wave5: opencode.jsonc — quitar SessionStart hook roto.
-6. [TODO] QA: medir boot y /session; evidencias.
+3. [DONE] Wave4: rebuild main.mjs + repack app.asar (--unpack node_modules, 2.5MB) + sync packages/web -> @openchamber/web (warmup paralelo, session-merge, health tolerance, scoped-config). Backups: app.asar.bak-20260816-pre-sync + unpacked.bak.
+4. [DONE] Wave3: OpenChamber relanzado 12:20. PushWatcher connected en 1s (antes 2.5min). Gate /session 200 OK 3-90ms (28KB). 0 proxy errors. Health flapping (contention DB con 2 TUIs + managed) -> restart ciclico rapido OK.
+5. [DONE] Wave5: hook SessionStart roto eliminado de opencode.jsonc.
+6. [DONE] QA: gate estable 3x, 0 proxy errors, boot 1s. Pendiente: ver UI en vivo.
 
 ## Nota previa (sesión 15/08 23:45)
 - 11 AppHangB1 de OpenChamber.exe (20:31-23:39): el main de Electron se cuelga → proxy deja de procesar → socket hang up → UI congelada → se recupera → repite.
+
