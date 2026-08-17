@@ -12,10 +12,12 @@ import {
 } from '@/components/sections/shared/SettingsSection';
 import { isDesktopShell, requestFileAccess } from '@/lib/desktop';
 import { updateDesktopSettings } from '@/lib/persistence';
-import { reloadOpenCodeConfiguration } from '@/stores/useAgentsStore';
+import { recordDeferredOpenCodeRestart } from '@/lib/opencode/deferredRestart';
 import { useUIStore } from '@/stores/useUIStore';
 import { useI18n } from '@/lib/i18n';
 import { runtimeFetch } from '@/lib/runtime-fetch';
+import { isWindowsArm64 } from '@/lib/platform';
+import { toast } from '@/components/ui';
 
 export const OpenCodeCliSettings: React.FC = () => {
   const { t } = useI18n();
@@ -88,11 +90,8 @@ export const OpenCodeCliSettings: React.FC = () => {
         ? trimmed.slice(1, -1).trim()
         : trimmed;
       await updateDesktopSettings({ opencodeBinary: unquoted });
-      await reloadOpenCodeConfiguration({
-        message: t('settings.openchamber.opencodeCli.actions.restartingOpenCode'),
-        mode: 'projects',
-        scopes: ['all'],
-      });
+      recordDeferredOpenCodeRestart('cli', { id: 'opencode-binary' });
+      toast.success(t('settings.view.pendingRestart.saved'));
     } finally {
       setIsSaving(false);
     }
@@ -151,13 +150,15 @@ export const OpenCodeCliSettings: React.FC = () => {
         </SettingsFieldRow>
 
         <SettingsInset className={SETTINGS_OPTION_STACK_CLASS}>
-          <SettingsCheckboxRow
-            settingsItem="sessions.opencode-update-notifications"
-            checked={showOpenCodeUpdateNotifications}
-            onChange={handleShowUpdateNotificationsChange}
-            label={t('settings.openchamber.opencodeCli.field.showUpdateNotifications')}
-            ariaLabel={t('settings.openchamber.opencodeCli.field.showUpdateNotificationsAria')}
-          />
+          {!isWindowsArm64() && (
+            <SettingsCheckboxRow
+              settingsItem="sessions.opencode-update-notifications"
+              checked={showOpenCodeUpdateNotifications}
+              onChange={handleShowUpdateNotificationsChange}
+              label={t('settings.openchamber.opencodeCli.field.showUpdateNotifications')}
+              ariaLabel={t('settings.openchamber.opencodeCli.field.showUpdateNotificationsAria')}
+            />
+          )}
 
           <SettingsCheckboxRow
             settingsItem="sessions.agent-control-tool"
@@ -176,7 +177,7 @@ export const OpenCodeCliSettings: React.FC = () => {
               disabled={isLoading || isSaving}
               className="shrink-0 !font-normal"
             >
-              {isSaving ? t('settings.common.actions.saving') : t('settings.openchamber.opencodeCli.actions.saveAndReload')}
+              {isSaving ? t('settings.common.actions.saving') : t('settings.common.actions.saveChanges')}
             </Button>
           </div>
         </SettingsInset>

@@ -13,6 +13,7 @@ import { useGlobalSyncStore } from '@/sync/global-sync-store';
 import MessageList, { type MessageListHandle } from './MessageList';
 import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
+import { hasActiveQuestionToolInCurrentTurn, recoverPendingQuestionWithRetry } from '@/sync/question-recovery';
 import { StatusRowContainer } from './StatusRowContainer';
 import { SessionRecapNote } from '@/components/chat/SessionRecapSpacer';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
@@ -50,11 +51,15 @@ import { usePlanDetection } from '@/hooks/usePlanDetection';
 import { useI18n } from '@/lib/i18n';
 import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
 import { isVSCodeRuntime } from '@/lib/desktop';
+import { WorkStatusPanel } from './work-status/WorkStatusPanel';
+import { useWorkStatusVisibility } from './work-status/useWorkStatusVisibility';
 import { getEmbeddedSessionChatOriginSessionId } from '@/components/layout/contextPanelEmbeddedChat';
 import { isFullySyntheticMessage } from '@/lib/messages/synthetic';
 import { normalizeUserDisplayParts } from './message/normalizeUserDisplayParts';
 import { findShellCommandForMessage, isUserShellMarkerMessage } from './lib/shellBridge';
 import { resolveChatPromptReadOnly } from './chatPromptReadOnly';
+import { getRuntimeKey } from '@/lib/runtime-switch';
+import { createFirstVisibleSessionPerformanceTracker } from '@/sync/session-load-performance';
 
 const EMPTY_MESSAGES: Array<{ info: Message; parts: Part[] }> = [];
 const IDLE_SESSION_STATUS = { type: 'idle' as const };
@@ -140,6 +145,7 @@ type HydratingToolSkeletonRow = {
 
 type ChatViewportProps = {
     currentSessionId: string;
+    currentSessionKey: string;
     isDesktopExpandedInput: boolean;
     isMobile: boolean;
     stickyUserHeader: boolean;
@@ -178,6 +184,7 @@ type ChatViewportProps = {
 
 const ChatViewport = React.memo(({
     currentSessionId,
+    currentSessionKey,
     isDesktopExpandedInput,
     isMobile,
     stickyUserHeader,
@@ -345,7 +352,7 @@ const ChatViewport = React.memo(({
                             </div>
                         )}
                         <MessageList
-                            key={currentSessionId}
+                            key={currentSessionKey}
                             ref={messageListRef}
                             sessionKey={currentSessionId}
                             disableStaging={pendingRevealWork}
@@ -398,6 +405,7 @@ const ChatViewport = React.memo(({
     );
 }, (prev, next) => {
     return prev.currentSessionId === next.currentSessionId
+        && prev.currentSessionKey === next.currentSessionKey
         && prev.isDesktopExpandedInput === next.isDesktopExpandedInput
         && prev.isMobile === next.isMobile
         && prev.stickyUserHeader === next.stickyUserHeader
@@ -516,7 +524,7 @@ const DraftWelcome: React.FC = () => {
                 )}
             </h1>
             <DraftPresetChips
-                onSubmit={(text) => useInputStore.getState().requestPresetSubmit(text)}
+                onSubmit={(starter) => useInputStore.getState().requestPresetSubmit(starter.submitText, starter.ref.type)}
                 className="oc-draft-starters mt-8 max-w-md"
             />
         </div>
@@ -542,14 +550,17 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
     const sync = useSync();
     const syncDirectory = useSyncDirectory();
     const effectiveSessionDirectory = currentSessionDirectory ?? syncDirectory;
+    const currentSessionKey = currentSessionId
+        ? JSON.stringify([getRuntimeKey(), effectiveSessionDirectory, currentSessionId])
+        : null;
     const ensureSessionRenderable = React.useCallback(
         (sessionId: string) => sync.ensureSessionRenderable(sessionId, false, effectiveSessionDirectory),
         [effectiveSessionDirectory, sync],
     );
     const loadMoreMessages = React.useCallback(
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        (sessionId: string, _direction: 'up' | 'down') => sync.loadMore(sessionId),
-        [sync],
+        (sessionId: string, _direction: 'up' | 'down') => sync.loadMore(sessionId, effectiveSessionDirectory),
+        [effectiveSessionDirectory, sync],
     );
 
     // UI store
@@ -589,6 +600,12 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
         currentSessionId ?? '',
         effectiveSessionDirectory,
     );
+    const [firstVisiblePerformance] = React.useState(createFirstVisibleSessionPerformanceTracker);
+
+    React.useEffect(() => {
+        if (!active || !currentSessionKey || !hasRenderableSessionSnapshot || sessionMessages.length === 0) return;
+        return firstVisiblePerformance.schedule(currentSessionKey, sessionMessages.length);
+    }, [active, currentSessionKey, firstVisiblePerformance, hasRenderableSessionSnapshot, sessionMessages.length]);
 
     // Plan detection - watches messages for plan creation and signals store
     usePlanDetection(currentSessionId ?? '', sessionMessages);
@@ -601,6 +618,26 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
     // the directory.
     const sessionPermissions = useScopedBlockingPermissions(currentSessionId, effectiveSessionDirectory);
     const sessionQuestions = useScopedBlockingQuestions(currentSessionId, effectiveSessionDirectory);
+
+    const hasUnreconciledQuestionTool = React.useMemo(
+        () => !sessionQuestions.some((question) => question.sessionID === currentSessionId)
+            && hasActiveQuestionToolInCurrentTurn(sessionMessages),
+        [currentSessionId, sessionMessages, sessionQuestions],
+    );
+
+    React.useEffect(() => {
+        if (!active || !currentSessionId || !effectiveSessionDirectory || !hasUnreconciledQuestionTool) return;
+        let cancelled = false;
+
+        void recoverPendingQuestionWithRetry(
+            () => sync.recoverPendingQuestions(currentSessionId, effectiveSessionDirectory),
+            { isCancelled: () => cancelled },
+        );
+
+        return () => {
+            cancelled = true;
+        };
+    }, [active, currentSessionId, effectiveSessionDirectory, hasUnreconciledQuestionTool, sync]);
 
     const sessionIsWorking = React.useMemo(() => {
         if (!currentSessionId || sessionPermissions.length > 0 || sessionQuestions.length > 0) {
@@ -675,11 +712,59 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
     const isVSCode = isVSCodeRuntime();
     const chatSurfaceMode = useChatSurfaceMode();
     const draftOpen = Boolean(newSessionDraft?.open);
+    // A draft can target another project or a pending worktree before it has a
+    // session. Keep the panel on that same directory so its project, MCP, and
+    // usage readouts describe where the draft will run rather than the project
+    // the user came from.
+    const workStatusDirectory = draftOpen
+        ? newSessionDraft?.bootstrapPendingDirectory ?? newSessionDraft?.directoryOverride ?? effectiveSessionDirectory
+        : effectiveSessionDirectory;
     const initError = useGlobalSyncStore((s) => s.error);
     // Despite the historical name, this now covers mobile too: the mobile
     // composer enters the same fullscreen-input mode via its drag handle.
     const isDesktopExpandedInput = isExpandedInput;
     const useCompactDraftLayout = isMobile || isVSCode || chatSurfaceMode === 'mini-chat';
+    // Work-status panel: a borderless column to the right of the transcript.
+    // It yields to the context panel and to a narrow chat; `rowRef` goes on the
+    // row that holds both columns, so its width never depends on the panel's
+    // own visibility.
+    const { rowRef: workStatusRowRef, visible: workStatusVisible, fits: workStatusFits } = useWorkStatusVisibility({
+        directory: workStatusDirectory,
+        isMobile,
+        isVSCode,
+    });
+    // Surfaces that never host the panel skip it entirely; the rest keep it
+    // mounted so its visibility can animate rather than snap.
+    const workStatusPanelMountable = !isMobile
+        && !isVSCode
+        && chatSurfaceMode !== 'mini-chat'
+        && !isDesktopExpandedInput;
+    const showWorkStatusPanel = workStatusPanelMountable && workStatusVisible;
+
+    // Offered over the chat when there is no room beside it. The panel is still
+    // switched on; only the layout refuses it.
+    const workStatusPanelEnabled = useUIStore((state) => state.workStatusPanelEnabled);
+    const workStatusOverlayOpen = useUIStore((state) => state.workStatusOverlayOpen);
+    const setWorkStatusPanelFits = useUIStore((state) => state.setWorkStatusPanelFits);
+    // Mounted whenever it could be shown, not only while it is: an element
+    // that appears and disappears with the condition has nothing to animate.
+    const workStatusOverlayMountable = workStatusPanelMountable
+        && workStatusPanelEnabled
+        && !workStatusFits;
+    const showWorkStatusOverlay = workStatusOverlayMountable && workStatusOverlayOpen;
+
+    React.useEffect(() => {
+        setWorkStatusPanelFits(workStatusPanelMountable && workStatusFits);
+        return () => setWorkStatusPanelFits(false);
+    }, [setWorkStatusPanelFits, workStatusFits, workStatusPanelMountable]);
+
+    // Published so the header can drop the readouts the panel already carries.
+    // Cleared on unmount: a chat that goes away is not showing anything.
+    const setWorkStatusPanelVisible = useUIStore((state) => state.setWorkStatusPanelVisible);
+    React.useEffect(() => {
+        setWorkStatusPanelVisible(showWorkStatusPanel);
+        return () => setWorkStatusPanelVisible(false);
+    }, [setWorkStatusPanelVisible, showWorkStatusPanel]);
     const messageListRef = React.useRef<MessageListHandle | null>(null);
     const currentSession = useSession(currentSessionId, effectiveSessionDirectory);
     const parentSession = useParentSession(currentSessionId, effectiveSessionDirectory);
@@ -757,7 +842,9 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
 
     React.useEffect(() => {
         if (autoOpenDraft && !currentSessionId && !draftOpen) {
-            openNewSessionDraft();
+            // Programmatic fallback, not user navigation — must not clear the
+            // persisted last-session pointer the cold-launch restore reads.
+            openNewSessionDraft({ automatic: true });
         }
     }, [autoOpenDraft, currentSessionId, draftOpen, openNewSessionDraft]);
 
@@ -779,6 +866,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
         showScrollButton,
     } = useChatAutoFollow({
         currentSessionId,
+        currentSessionKey,
         sessionMessageCount,
         sessionIsWorking,
         isMobile,
@@ -789,6 +877,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
 
     const timelineController = useChatTimelineController({
         sessionId: currentSessionId,
+        sessionKey: currentSessionKey,
         messages: viewportMessages,
         historyMeta,
         scrollRef,
@@ -940,7 +1029,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
         };
     }, [currentSessionId, isDesktopExpandedInput, scrollRef]);
 
-    const lastScrolledSessionRef = React.useRef<string | null>(null);
+    const lastScrolledSessionKeyRef = React.useRef<string | null>(null);
 
     const isSessionHydrating =
         Boolean(currentSessionId)
@@ -952,10 +1041,10 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
 
     React.useEffect(() => {
         if (!active || !currentSessionId) return;
-        if (lastScrolledSessionRef.current === currentSessionId) return;
+        if (lastScrolledSessionKeyRef.current === currentSessionKey) return;
 
         const hasHashTarget = typeof window !== 'undefined' && window.location.hash.length > 0;
-        lastScrolledSessionRef.current = currentSessionId;
+        lastScrolledSessionKeyRef.current = currentSessionKey;
         if (hasHashTarget) {
             // Hash navigation handler will scroll to target; we just release auto-follow.
             releaseAutoFollow();
@@ -970,7 +1059,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
         } else {
             window.requestAnimationFrame(run);
         }
-    }, [active, currentSessionId, releaseAutoFollow, restoreSnapshot]);
+    }, [active, currentSessionId, currentSessionKey, releaseAutoFollow, restoreSnapshot]);
 
     React.useEffect(() => {
         if (!active || !currentSessionId) return;
@@ -998,20 +1087,37 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
 			// No transform on this root: it would become the containing block for
 			// the fullscreen composer's position:fixed visual-viewport pinning in
 			// mobile browsers (see ChatInput's composerFormRef effect).
-			<div data-composer-bound className="relative flex h-full flex-col bg-background">
-				{useCompactDraftLayout && !isDesktopExpandedInput ? <DraftWelcome /> : null}
-				<div
-					className={cn(
-						'relative z-10 flex min-h-0',
-						isDesktopExpandedInput
-							? 'flex-1 bg-background'
-							: useCompactDraftLayout
-								? 'bg-background px-0'
-								: 'flex-1 items-center justify-center bg-background px-0 pb-[6vh]'
-					)}
-				>
-                        {promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={scrollToBottomOnSend} />}
+			<div ref={workStatusRowRef} className="flex h-full min-h-0 bg-background">
+				<div data-composer-bound className="relative flex min-w-0 flex-1 flex-col bg-background">
+					{useCompactDraftLayout && !isDesktopExpandedInput ? <DraftWelcome /> : null}
+					<div
+						className={cn(
+							'relative z-10 flex min-h-0',
+							isDesktopExpandedInput
+								? 'flex-1 bg-background'
+								: useCompactDraftLayout
+									? 'bg-background px-0'
+									: 'flex-1 items-center justify-center bg-background px-0 pb-[6vh]'
+						)}
+					>
+                          {promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={scrollToBottomOnSend} />}
+					</div>
+					{workStatusOverlayMountable ? (
+						<WorkStatusPanel
+							overlay
+							visible={showWorkStatusOverlay}
+							sessionId={null}
+							directory={workStatusDirectory ?? null}
+						/>
+					) : null}
 				</div>
+				{workStatusPanelMountable ? (
+					<WorkStatusPanel
+						visible={showWorkStatusPanel}
+						sessionId={null}
+						directory={workStatusDirectory ?? null}
+					/>
+				) : null}
 			</div>
         );
     }
@@ -1134,10 +1240,12 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
     }
 
 	return (
-		<div data-composer-bound className="relative flex flex-col h-full bg-background">
+		<div ref={workStatusRowRef} className="flex h-full min-h-0 bg-background">
+		<div data-composer-bound className="relative flex min-w-0 flex-1 flex-col h-full bg-background">
 			{returnToParentButton}
 			<ChatViewport
 				currentSessionId={currentSessionId}
+                currentSessionKey={currentSessionKey ?? currentSessionId}
                 isDesktopExpandedInput={isDesktopExpandedInput}
                 isMobile={isMobile}
                 stickyUserHeader={stickyUserHeader}
@@ -1186,6 +1294,18 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
                 {promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={scrollToBottomOnSend} />}
             </div>
 
+            {/* Inside the chat column, not beside it: as a row sibling it took
+                part in the flex layout and pushed the transcript, which is the
+                one thing an overlay must not do. */}
+            {workStatusOverlayMountable ? (
+                <WorkStatusPanel
+                    overlay
+                    visible={showWorkStatusOverlay}
+                    sessionId={currentSessionId ?? null}
+                    directory={workStatusDirectory ?? null}
+                />
+            ) : null}
+
             <TimelineDialog
                 open={isTimelineDialogOpen}
                 onOpenChange={setTimelineDialogOpen}
@@ -1196,6 +1316,17 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ active = true, aut
                 isLoadingEarlier={timelineController.isLoadingOlder}
                 onLoadEarlier={handleLoadOlderClick}
             />
+        </div>
+        {/* Kept mounted while it could ever show, so it can animate its own
+            collapse; `visible` drives that. Unmounting on the spot is what made
+            the chat jump wide before easing narrow again. */}
+        {workStatusPanelMountable ? (
+            <WorkStatusPanel
+                visible={showWorkStatusPanel}
+                sessionId={currentSessionId ?? null}
+                directory={workStatusDirectory ?? null}
+            />
+        ) : null}
         </div>
     );
 };

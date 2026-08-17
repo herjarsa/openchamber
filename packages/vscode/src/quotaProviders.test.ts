@@ -1,14 +1,24 @@
-import { afterEach, beforeEach, describe, test } from 'node:test';
+import { after, afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const previousQuotaDataDirectory = process.env.OPENCHAMBER_DATA_DIR;
+const temporaryQuotaDataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'openchamber-vscode-quota-'));
+process.env.OPENCHAMBER_DATA_DIR = temporaryQuotaDataDirectory;
 
 // readAuthFile reads ~/.local/share/opencode/auth.json via fs.readFileSync.
 // Stub fs to serve a known auth entry so the providers treat themselves as
 // configured and proceed straight to fetch.
 const ORIGINAL_FS = { ...fs };
 const AUTH = JSON.stringify({
+  openai: { access: 'test-token' },
   crof: { key: 'test-token' },
   neuralwatt: { key: 'test-token' },
+  'opencode-go': { key: 'test-token' },
+  'zai-coding-plan': { key: 'test-token' },
+  deepseek: { key: 'test-token' },
 });
 ((fs as unknown) as { existsSync: () => boolean }).existsSync = () => true;
 ((fs as unknown) as { readFileSync: () => string }).readFileSync = () => AUTH;
@@ -16,6 +26,12 @@ const AUTH = JSON.stringify({
 import { fetchQuotaForProvider } from './quotaProviders';
 
 type MockResponseInit = { ok?: boolean; status?: number };
+
+after(() => {
+  if (previousQuotaDataDirectory === undefined) delete process.env.OPENCHAMBER_DATA_DIR;
+  else process.env.OPENCHAMBER_DATA_DIR = previousQuotaDataDirectory;
+  fs.rmSync(temporaryQuotaDataDirectory, { recursive: true, force: true });
+});
 
 const mockResponse = (body: unknown, init: MockResponseInit = {}): Response => ({
   ok: 'ok' in init ? init.ok! : true,
@@ -66,6 +82,26 @@ const stubFetchFailing = (json: () => Promise<unknown>, init: MockResponseInit):
   globalThis.fetch = (async () => ({ json, ...init }) as unknown as Response) as typeof fetch;
 };
 
+describe('OpenCode Go quota provider (VS Code parity)', () => {
+  test('uses the opencode-go key from auth.json', async () => {
+    let request: RequestInit | undefined;
+    const legacyPath = path.join(temporaryQuotaDataDirectory, 'quota', 'opencode-go.json');
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, '{not valid json');
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      request = init;
+      return mockResponse({ usage: { rolling: { percent: 25, resetsAt: '2026-08-12T12:00:00.000Z' } } });
+    }) as typeof fetch;
+
+    const result = await fetchQuotaForProvider('opencode-go');
+
+    assert.equal(result.ok, true);
+    assert.equal((request?.headers as Record<string, string>).Authorization, 'Bearer test-token');
+    assert.equal(result.usage!.windows['5h']!.usedPercent, 25);
+    assert.throws(() => fs.statSync(legacyPath));
+  });
+});
+
 describe('Crof quota provider (VS Code parity)', () => {
   test('reports credits balance as valueLabel with null percent', async () => {
     stubFetchReturning(() => Promise.resolve(mockResponse({ usable_requests: 450, credits: 12.3456 })));
@@ -109,6 +145,58 @@ describe('Crof quota provider (VS Code parity)', () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.error, 'Invalid response from provider');
+  });
+});
+
+describe('Codex quota provider (VS Code parity)', () => {
+  test('surfaces spend_control individual limit for business accounts', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      plan_type: 'business',
+      rate_limit: null,
+      credits: { has_credits: true, unlimited: false, balance: null },
+      spend_control: {
+        individual_limit: {
+          limit: '7500',
+          used: '2674.8724080324173',
+          remaining: '4825.127591967583',
+          used_percent: 36,
+          remaining_percent: 64,
+        },
+      },
+    })));
+
+    const result = await fetchQuotaForProvider('codex');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.usage!.windows.credits!.usedPercent, 36);
+    assert.equal(result.usage!.windows.credits!.valueLabel, '2675 / 7500 used');
+  });
+});
+
+describe('Z.ai quota provider (VS Code parity)', () => {
+  test('surfaces 5-hour, weekly, and MCP quota windows', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      data: {
+        limits: [
+          { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 0 },
+          { type: 'TOKENS_LIMIT', unit: 6, number: 1, percentage: 100, nextResetTime: 1785659659993 },
+          { type: 'TIME_LIMIT', unit: 5, number: 1, percentage: 0, nextResetTime: 1787128459979 },
+        ],
+      },
+    })));
+
+    const result = await fetchQuotaForProvider('zai-coding-plan');
+    const windows = result.usage!.windows;
+
+    assert.equal(result.ok, true);
+    assert.equal(windows['5h']!.usedPercent, 0);
+    assert.equal(windows['5h']!.windowSeconds, 5 * 60 * 60);
+    assert.equal(windows.weekly!.usedPercent, 100);
+    assert.equal(windows.weekly!.windowSeconds, 7 * 24 * 60 * 60);
+    assert.equal(windows.weekly!.resetAt, 1785659659993);
+    assert.equal(windows['MCP Tools']!.usedPercent, 0);
+    assert.equal(windows['MCP Tools']!.windowSeconds, 30 * 24 * 60 * 60);
+    assert.equal(windows['MCP Tools']!.resetAt, 1787128459979);
   });
 });
 
@@ -359,6 +447,96 @@ describe('NeuralWatt quota provider (VS Code parity)', () => {
   });
 
   // Restore fs so other test files (which use the real auth file) are unaffected.
+  test('teardown: restore fs', () => {
+    const fsMock = fs as unknown as { existsSync: unknown; readFileSync: unknown };
+    fsMock.existsSync = ORIGINAL_FS.existsSync;
+    fsMock.readFileSync = ORIGINAL_FS.readFileSync;
+  });
+});
+
+describe('DeepSeek quota provider (VS Code parity)', () => {
+  beforeEach(() => {
+    const fsMock = fs as unknown as { existsSync: () => boolean; readFileSync: () => string };
+    fsMock.existsSync = () => true;
+    fsMock.readFileSync = () => AUTH;
+  });
+
+  test('builds credits_balance window from documented USD payload (string balance)', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      is_available: true,
+      balance_infos: [
+        { currency: 'USD', total_balance: '7.54', granted_balance: '0.00', topped_up_balance: '7.54' },
+      ],
+    })));
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.providerId, 'deepseek');
+    assert.equal(result.usage!.windows.credits_balance!.valueLabel, '$7.54');
+    assert.equal(result.usage!.windows.credits_balance!.usedPercent, null);
+    assert.equal(result.usage!.windows.credits_balance!.windowSeconds, null);
+    assert.equal(result.usage!.windows.credits_balance!.resetAt, null);
+  });
+
+  test('falls back to CNY entry with ¥ symbol when no USD entry is present', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      is_available: true,
+      balance_infos: [
+        { currency: 'CNY', total_balance: '100.00', granted_balance: '0.00', topped_up_balance: '100.00' },
+      ],
+    })));
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.usage!.windows.credits_balance!.valueLabel, '¥100.00');
+  });
+
+  test('maps 401 to session-expired', async () => {
+    stubFetchFailing(async () => ({}), { ok: false, status: 401 });
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'Session expired — please re-authenticate with DeepSeek');
+  });
+
+  test('reports a normalized timeout error', async () => {
+    stubFetchReturning(() => Promise.reject(new DOMException('The operation timed out.', 'TimeoutError')));
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'Request timed out');
+  });
+
+  test('returns no-quota-data on a 200 payload with no usable balance', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      is_available: true,
+      balance_infos: [{ currency: 'USD', total_balance: '', granted_balance: '0.00', topped_up_balance: '0.00' }],
+    })));
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.configured, true);
+    assert.equal(result.error, 'No quota data in response');
+    assert.equal(result.usage, null);
+  });
+
+  test('keeps a literal zero balance as a valid valueLabel', async () => {
+    stubFetchReturning(() => Promise.resolve(mockResponse({
+      is_available: true,
+      balance_infos: [{ currency: 'USD', total_balance: '0.00', granted_balance: '0.00', topped_up_balance: '0.00' }],
+    })));
+
+    const result = await fetchQuotaForProvider('deepseek');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.usage!.windows.credits_balance!.valueLabel, '$0.00');
+  });
+
   test('teardown: restore fs', () => {
     const fsMock = fs as unknown as { existsSync: unknown; readFileSync: unknown };
     fsMock.existsSync = ORIGINAL_FS.existsSync;

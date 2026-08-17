@@ -56,6 +56,7 @@ export type State = {
   sessionEventRevision?: Record<string, number>
   sessionDeletedRevision?: Record<string, number>
   session_status: Record<string, SessionStatus>
+  session_error: Record<string, SubagentErrorRecord>
   session_diff: Record<string, FileDiff[]>
   todo: Record<string, Todo[]>
   permission: Record<string, PermissionRequest[]>
@@ -66,6 +67,19 @@ export type State = {
   limit: number
   message: Record<string, Message[]>
   part: Record<string, Part[]>
+}
+
+/** Error state persisted from session.error events. */
+export type SubagentError = {
+  message?: string
+  code?: string
+}
+export type SubagentErrorRecord = {
+  sessionID: string
+  parentSessionID?: string
+  error: SubagentError
+  timestamp: number
+  toolCallID?: string
 }
 
 /** Global store state */
@@ -96,6 +110,7 @@ export type EvictPlan = {
   pins: Set<string>
   max: number
   ttl: number
+  graceMs?: number
   now: number
   hasPendingBlockingRequests?: (directory: string) => boolean
 }
@@ -110,6 +125,18 @@ export type DisposeCheck = {
 }
 
 export const MAX_DIR_STORES = 30
+/**
+ * Directories touched within this window are never overflow-eviction victims.
+ *
+ * Sidebar rows call `ensureChild` during render but only take their pin in an
+ * effect after commit. Without a grace window, expanding a project with more
+ * worktrees than `MAX_DIR_STORES` evicted directories that were actively
+ * rendering, which recreated them, which issued another bootstrap request, in
+ * an endless loop (issue #1472). The limit is therefore a soft target: a burst
+ * of live directories overflows briefly rather than thrashing, and the cache is
+ * bounded by idle-time eviction instead.
+ */
+export const EVICTION_GRACE_MS = 30 * 1000
 export const DIR_IDLE_TTL_MS = 20 * 60 * 1000
 export const SESSION_CACHE_LIMIT = 40
 
@@ -130,6 +157,7 @@ export const INITIAL_STATE: State = {
   sessionEventRevision: {},
   sessionDeletedRevision: {},
   session_status: {},
+  session_error: {},
   session_diff: {},
   todo: {},
   permission: {},

@@ -1,15 +1,23 @@
 import React from 'react';
 
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
+import { DiffViewIcon } from '@/components/icons/DiffIcon';
 import { Button } from '@/components/ui/button';
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
-import { DiffView } from '@/components/views/DiffView';
-import { FilesView } from '@/components/views/FilesView';
-import { GitView } from '@/components/views/GitView';
 import { PullRequestView } from '@/components/views/PullRequestView';
 import { TerminalView } from '@/components/views/TerminalView';
-import { PlanView } from '@/components/views/PlanView';
+import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
+
+// Heavy views stay on-demand (same as MainLayout): importing DiffView/FilesView
+// or the walkthrough statically pulls the CodeMirror and @pierre/diffs stacks
+// into the eager startup graph even when no such tab is open.
+const WalkthroughView = lazyWithChunkRecovery(() => import('@/components/views/walkthrough/WalkthroughView').then((m) => ({ default: m.WalkthroughView })));
+const DiffView = lazyWithChunkRecovery(() => import('@/components/views/DiffView').then((m) => ({ default: m.DiffView })));
+const FilesView = lazyWithChunkRecovery(() => import('@/components/views/FilesView').then((m) => ({ default: m.FilesView })));
+const GitView = lazyWithChunkRecovery(() => import('@/components/views/GitView').then((m) => ({ default: m.GitView })));
+const PlanView = lazyWithChunkRecovery(() => import('@/components/views/PlanView').then((m) => ({ default: m.PlanView })));
 import { ProjectContextPanel } from './RightSidebarTabs';
+import { SubagentsPanel } from './SubagentsPanel';
 import { SidebarFilesTree } from './SidebarFilesTree';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { openExternalUrl } from '@/lib/url';
@@ -27,15 +35,24 @@ import { setExternallyViewedSession, useDirectoryStore } from '@/sync/sync-conte
 import { ContextPanelContent } from './ContextSidebarTab';
 import { toast } from '@/components/ui';
 import { runtimeFetch } from '@/lib/runtime-fetch';
-import { refreshRuntimeUrlAuthToken } from '@/lib/runtime-auth';
+import { getRuntimeBearerTokenSync, getRuntimeExtraHeadersSync, refreshRuntimeUrlAuthToken } from '@/lib/runtime-auth';
 import { getRuntimeUrlResolver } from '@/lib/runtime-url';
-import { getRuntimeApiBaseUrl } from '@/lib/runtime-switch';
+import { getRuntimeApiBaseUrl, getRuntimeKey } from '@/lib/runtime-switch';
+import { getActiveRelayDescriptor } from '@/lib/relay/runtime-tunnel';
 import { getPreviewTargetRecoveryAction } from '@/lib/preview/proxy-response';
 import { Icon } from "@/components/icon/Icon";
 import { OpenChamberLogo } from "@/components/ui/OpenChamberLogo";
 import { invokeDesktopCommand } from '@/lib/desktopNative';
-import { getOrCreateEmbeddedSessionChatURL, type EmbeddedSessionChatURLCacheEntry } from './contextPanelEmbeddedChat';
+import {
+  EMBEDDED_RUNTIME_BOOTSTRAP_REQUEST,
+  EMBEDDED_RUNTIME_BOOTSTRAP_RESPONSE,
+  getActiveEmbeddedSessionChatTab,
+  getOrCreateEmbeddedSessionChatURL,
+  type EmbeddedSessionChatURLCacheEntry,
+  type EmbeddedSessionRuntimeBootstrap,
+} from './contextPanelEmbeddedChat';
 import { getContextSurfaceWidthFraction } from '@/lib/surfaces/registry';
+import { isTerminalEventTarget } from '@/lib/terminalFocus';
 import {
   type PreviewElementMetadata,
   isPreviewElementMetadata,
@@ -151,9 +168,11 @@ const getModeLabel = (
   if (mode === 'chat') return t('contextPanel.mode.chat');
   if (mode === 'file') return t('contextPanel.mode.files');
   if (mode === 'diff') return t('contextPanel.mode.diff');
+  if (mode === 'walkthrough') return t('contextPanel.mode.walkthrough');
   if (mode === 'plan') return t('contextPanel.mode.plan');
   if (mode === 'preview') return t('contextPanel.mode.preview');
   if (mode === 'browser') return t('contextPanel.mode.browser');
+  if (mode === 'subagents') return t('contextPanel.mode.subagents');
   if (mode === 'git') return t('layout.rightSidebar.git');
   if (mode === 'pr') return t('contextPanel.mode.pr');
   if (mode === 'notes') return t('contextRail.surface.notes');
@@ -237,7 +256,11 @@ const getTabIcon = (tab: { mode: ContextPanelMode; targetPath: string | null }):
   }
 
   if (tab.mode === 'diff') {
-    return <Icon name="arrow-left-right" className="h-3.5 w-3.5" />;
+    return <DiffViewIcon className="h-3.5 w-3.5" />;
+  }
+
+  if (tab.mode === 'walkthrough') {
+    return <Icon name="route" className="h-3.5 w-3.5" />;
   }
 
   if (tab.mode === 'git') {
@@ -245,7 +268,7 @@ const getTabIcon = (tab: { mode: ContextPanelMode; targetPath: string | null }):
   }
 
   if (tab.mode === 'pr') {
-    return <Icon name="git-pull-request" className="h-3.5 w-3.5" />;
+    return <Icon name="github" className="h-3.5 w-3.5" />;
   }
 
   if (tab.mode === 'notes') {
@@ -360,7 +383,7 @@ const EditorTreeColumn: React.FC<{ visible: boolean }> = ({ visible }) => {
     <div
       ref={columnRef}
       className={cn(
-        'relative h-full flex-shrink-0 overflow-hidden border-l border-border/40 bg-background will-change-[width] motion-reduce:transition-none',
+        'relative h-full flex-shrink-0 overflow-hidden border-l border-border bg-background will-change-[width] motion-reduce:transition-none',
         !visible && 'border-l-0',
       )}
       style={{
@@ -1241,7 +1264,7 @@ const PreviewPane: React.FC<PreviewPaneProps> = ({ rawUrl, onNavigate }) => {
 
   return (
     <div className="absolute inset-0 flex flex-col">
-      <div className="flex items-center gap-1 border-b border-border/40 bg-[var(--surface-background)] px-2 py-1">
+      <div className="flex items-center gap-1 border-b border-border bg-[var(--surface-background)] px-2 py-1">
         <div className="min-w-0 flex-1 truncate typography-micro text-muted-foreground" title={headerSrc || rawUrl}>
           {headerSrc || rawUrl || t('contextPanel.preview.empty')}
         </div>
@@ -1870,7 +1893,7 @@ const IframeBrowserPane: React.FC<DesktopBrowserPaneProps> = ({ initialUrl, dire
 
   return (
     <div className="absolute inset-0 flex flex-col bg-background">
-      <div className="flex items-center gap-1 border-b border-border/40 bg-[var(--surface-background)] px-2 py-1">
+      <div className="flex items-center gap-1 border-b border-border bg-[var(--surface-background)] px-2 py-1">
         <Button type="button" variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={historyIndex <= 0} onClick={() => goToHistory(historyIndex - 1)}>
           <Icon name="arrow-left" className="h-3.5 w-3.5" />
         </Button>
@@ -2160,7 +2183,7 @@ const DesktopBrowserPane: React.FC<DesktopBrowserPaneProps> = ({ initialUrl, dir
 
   return (
     <div className="absolute inset-0 flex flex-col bg-background">
-      <div className="flex items-center gap-1 border-b border-border/40 bg-[var(--surface-background)] px-2 py-1">
+      <div className="flex items-center gap-1 border-b border-border bg-[var(--surface-background)] px-2 py-1">
         <Button type="button" variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => { try { webviewRef.current?.goBack?.(); } catch { /* webview not ready */ } }}>
           <Icon name="arrow-left" className="h-3.5 w-3.5" />
         </Button>
@@ -2439,6 +2462,13 @@ export const ContextPanel: React.FC = () => {
       return;
     }
 
+    // Terminal owns Escape so the PTY receives it (e.g. Vim Normal mode).
+    // ghostty-web listens in the bubble phase; stopping capture here would
+    // swallow the key before the terminal ever sees it (issue #2644).
+    if (isTerminalEventTarget(event.target)) {
+      return;
+    }
+
     event.preventDefault();
     event.stopPropagation();
     handleClose();
@@ -2456,8 +2486,13 @@ export const ContextPanel: React.FC = () => {
 
   }, [activeTab, directoryKey, setSelectedFilePath]);
 
-  const activeChatTabID = activeTab?.mode === 'chat' ? activeTab.id : null;
-  const activeChatSessionID = activeTab?.mode === 'chat' ? getSessionIDFromDedupeKey(activeTab.dedupeKey) : null;
+  const chatTabs = React.useMemo(
+    () => tabs.filter((tab) => tab.mode === 'chat'),
+    [tabs],
+  );
+  const activeChatTabID = isOpen && activeTab?.mode === 'chat' ? activeTab.id : null;
+  const activeChatSessionID = isOpen && activeTab?.mode === 'chat' ? getSessionIDFromDedupeKey(activeTab.dedupeKey) : null;
+  const activeChatTab = getActiveEmbeddedSessionChatTab(chatTabs, activeChatTabID);
 
   React.useEffect(() => {
     if (!isOpen || !directoryKey || !activeChatSessionID || typeof window === 'undefined') {
@@ -2497,6 +2532,10 @@ export const ContextPanel: React.FC = () => {
       currentTheme,
     });
   }, [currentTheme, darkThemeId, directoryKey, lightThemeId, themeMode]);
+
+  const activeChatSrc = activeChatTab && activeChatSessionID
+    ? getEmbeddedChatSrc(activeChatTab.id, activeChatSessionID, activeChatTab.readOnly)
+    : null;
 
   React.useEffect(() => {
     const liveTabIDs = new Set(tabs.map((tab) => tab.id));
@@ -2538,19 +2577,6 @@ export const ContextPanel: React.FC = () => {
         continue;
       }
 
-      const directThemeSync = (frameWindow as unknown as {
-        __openchamberApplyThemeSync?: (themePayload: typeof payload) => void;
-      }).__openchamberApplyThemeSync;
-
-      if (typeof directThemeSync === 'function') {
-        try {
-          directThemeSync(payload);
-          continue;
-        } catch {
-          // fallback to postMessage below
-        }
-      }
-
       frameWindow.postMessage(
         {
           type: 'openchamber:theme-sync',
@@ -2569,18 +2595,6 @@ export const ContextPanel: React.FC = () => {
       const frameWindow = frame.contentWindow;
       if (!frameWindow) continue;
 
-      const directSync = (frameWindow as unknown as {
-        __openchamberApplyChatSettingsSync?: (settings: typeof payload) => void;
-      }).__openchamberApplyChatSettingsSync;
-      if (typeof directSync === 'function') {
-        try {
-          directSync(payload);
-          continue;
-        } catch {
-          // fallback to postMessage below
-        }
-      }
-
       frameWindow.postMessage({ type: 'openchamber:chat-settings-sync', payload }, window.location.origin);
     }
   }, [allowPromptingSubagentSessions]);
@@ -2597,19 +2611,6 @@ export const ContextPanel: React.FC = () => {
       }
 
       const payload = { visible: activeChatTabID === tabID };
-      const directVisibilitySync = (frameWindow as unknown as {
-        __openchamberSetEmbeddedVisibility?: (visibilityPayload: typeof payload) => void;
-      }).__openchamberSetEmbeddedVisibility;
-
-      if (typeof directVisibilitySync === 'function') {
-        try {
-          directVisibilitySync(payload);
-          continue;
-        } catch {
-          // fallback to postMessage below
-        }
-      }
-
       frameWindow.postMessage(
         {
           type: 'openchamber:embedded-visibility',
@@ -2636,7 +2637,27 @@ export const ContextPanel: React.FC = () => {
         return;
       }
 
-      const data = event.data as { type?: unknown };
+      const data = event.data as { type?: unknown; requestId?: unknown };
+      if (data?.type === EMBEDDED_RUNTIME_BOOTSTRAP_REQUEST) {
+        if (typeof data.requestId !== 'string' || !data.requestId) return;
+        const runtimeKey = getRuntimeKey();
+        const payload: EmbeddedSessionRuntimeBootstrap = {
+          apiBaseUrl: getRuntimeApiBaseUrl(),
+          clientToken: getRuntimeBearerTokenSync(),
+          localOrigin: typeof window.__OPENCHAMBER_LOCAL_ORIGIN__ === 'string'
+            ? window.__OPENCHAMBER_LOCAL_ORIGIN__
+            : '',
+          runtimeHeaders: getRuntimeExtraHeadersSync(),
+          relayHostId: runtimeKey.startsWith('host:') ? runtimeKey.slice('host:'.length) : '',
+          relay: getActiveRelayDescriptor() ?? undefined,
+        };
+        (event.source as WindowProxy | null)?.postMessage({
+          type: EMBEDDED_RUNTIME_BOOTSTRAP_RESPONSE,
+          requestId: data.requestId,
+          payload,
+        }, event.origin);
+        return;
+      }
       if (data?.type === 'openchamber:theme-sync-request') {
         postThemeSyncToEmbeddedChat();
         return;
@@ -2695,13 +2716,15 @@ export const ContextPanel: React.FC = () => {
   const activeNonChatContent = activeTab?.mode === 'context'
         ? <ContextPanelContent />
         : activeTab?.mode === 'git'
-            ? <GitView isActive={isOpen} />
+            ? <React.Suspense fallback={null}><GitView isActive={isOpen} /></React.Suspense>
             : activeTab?.mode === 'pr'
                 ? <PullRequestView />
+            : activeTab?.mode === 'subagents'
+                ? <SubagentsPanel />
             : activeTab?.mode === 'notes'
                 ? <ProjectContextPanel />
         : activeTab?.mode === 'plan'
-            ? <PlanView targetPath={activeTab.targetPath} />
+            ? <React.Suspense fallback={null}><PlanView targetPath={activeTab.targetPath} /></React.Suspense>
             : activeTab?.mode === 'preview'
                 ? <PreviewPane rawUrl={activeTab.targetPath ?? ''} onNavigate={(url) => openContextPreview(effectiveDirectory, url)} />
                 : (
@@ -2712,10 +2735,6 @@ export const ContextPanel: React.FC = () => {
                   </div>
                 );
 
-  const chatTabs = React.useMemo(
-    () => tabs.filter((tab) => tab.mode === 'chat'),
-    [tabs],
-  );
   const browserTabs = React.useMemo(
     () => tabs.filter((tab) => tab.mode === 'browser'),
     [tabs],
@@ -2726,6 +2745,12 @@ export const ContextPanel: React.FC = () => {
   );
   const hasTerminalTab = React.useMemo(
     () => tabs.some((tab) => tab.mode === 'terminal'),
+    [tabs],
+  );
+  // Keep-alive: the walkthrough holds reading progress and scroll position that
+  // a remount would silently throw away.
+  const hasWalkthroughTab = React.useMemo(
+    () => tabs.some((tab) => tab.mode === 'walkthrough'),
     [tabs],
   );
   const BrowserPane = isElectronBrowserRuntime() ? DesktopBrowserPane : IframeBrowserPane;
@@ -2741,7 +2766,7 @@ export const ContextPanel: React.FC = () => {
   const isFileTabActive = activeTab?.mode === 'file';
 
   const header = (
-    <header className="flex h-10 items-stretch border-b border-border/40">
+    <header className="flex h-10 items-stretch border-b border-border">
       {isMultiInstanceMode ? (
         <SortableTabsStrip
           items={tabItems}
@@ -2865,11 +2890,11 @@ export const ContextPanel: React.FC = () => {
           content box only while collapsed, shifting the header controls by
           1px between the collapsed and expanded states. */}
       {isOpen && !isExpanded && (
-        <div aria-hidden="true" className="absolute left-0 top-0 z-40 h-full w-px bg-border/40" />
+        <div aria-hidden="true" className="absolute left-0 top-0 z-40 h-full w-px bg-border" />
       )}
       {/* Divider between the panel and the icon rail on its right. */}
       {isOpen && (
-        <div aria-hidden="true" className="absolute right-0 top-0 z-40 h-full w-px bg-border/40" />
+        <div aria-hidden="true" className="absolute right-0 top-0 z-40 h-full w-px bg-border" />
       )}
       {!isExpanded && (
         <div
@@ -2907,7 +2932,7 @@ export const ContextPanel: React.FC = () => {
           <div className={cn('absolute inset-0 flex', isFileTabActive ? 'flex' : 'hidden')}>
             <div className="h-full min-w-0 flex-1">
               {hasOpenEditorFile ? (
-                <FilesView mode="editor-only" />
+                <React.Suspense fallback={null}><FilesView mode="editor-only" /></React.Suspense>
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
                   <Icon name="file-code" className="h-12 w-12 text-muted-foreground/50" />
@@ -2919,41 +2944,26 @@ export const ContextPanel: React.FC = () => {
             <EditorTreeColumn visible={contextEditorTreeVisible} />
           </div>
         ) : null}
-        {chatTabs.map((tab) => {
-          const sessionID = getSessionIDFromDedupeKey(tab.dedupeKey);
-          if (!sessionID) {
-            return null;
-          }
-
-          const src = getEmbeddedChatSrc(tab.id, sessionID, tab.readOnly);
-          if (!src) {
-            return null;
-          }
-
-          return (
-            <iframe
-              key={tab.id}
-              ref={(node) => {
-                if (!node) {
-                  chatFrameRefs.current.delete(tab.id);
-                  return;
-                }
-                chatFrameRefs.current.set(tab.id, node);
-              }}
-              src={src}
-              title={t('contextPanel.iframe.sessionChatTitle', { sessionID })}
-              className={cn(
-                'absolute inset-0 h-full w-full border-0 bg-background',
-                activeChatTabID === tab.id ? 'block' : 'hidden'
-              )}
-              onLoad={() => {
-                postThemeSyncToEmbeddedChat();
-                postChatSettingsSyncToEmbeddedChat();
-                postEmbeddedVisibilityToChats();
-              }}
-            />
-          );
-        })}
+        {activeChatTab && activeChatSessionID && activeChatSrc ? (
+          <iframe
+            key={activeChatTab.id}
+            ref={(node) => {
+              if (!node) {
+                chatFrameRefs.current.delete(activeChatTab.id);
+                return;
+              }
+              chatFrameRefs.current.set(activeChatTab.id, node);
+            }}
+            src={activeChatSrc}
+            title={t('contextPanel.iframe.sessionChatTitle', { sessionID: activeChatSessionID })}
+            className="absolute inset-0 h-full w-full border-0 bg-background"
+            onLoad={() => {
+              postThemeSyncToEmbeddedChat();
+              postChatSettingsSyncToEmbeddedChat();
+              postEmbeddedVisibilityToChats();
+            }}
+          />
+        ) : null}
         {browserTabs.map((tab) => (
           <div
             key={tab.id}
@@ -2973,16 +2983,18 @@ export const ContextPanel: React.FC = () => {
               activeTab?.id !== tab.id && 'hidden'
             )}
           >
-            <DiffView
-              hideStackedFileSidebar
-              stackedDefaultCollapsedAll
-              pinSelectedFileHeaderToTopOnNavigate
-              showOpenInEditorAction
-              diffScope={tab.diffScope ?? (tab.stagedDiff ? 'staged' : 'working')}
-              onDiffScopeChange={handleDiffScopeChange}
-              targetFilePath={tab.targetPath}
-              flushContent
-            />
+            <React.Suspense fallback={null}>
+              <DiffView
+                hideStackedFileSidebar
+                stackedDefaultCollapsedAll
+                pinSelectedFileHeaderToTopOnNavigate
+                showOpenInEditorAction
+                diffScope={tab.diffScope ?? (tab.stagedDiff ? 'staged' : 'working')}
+                onDiffScopeChange={handleDiffScopeChange}
+                targetFilePath={tab.targetPath}
+                flushContent
+              />
+            </React.Suspense>
           </div>
         ))}
         {hasTerminalTab ? (
@@ -2990,7 +3002,14 @@ export const ContextPanel: React.FC = () => {
             <TerminalView visible={isOpen && activeTab?.mode === 'terminal'} />
           </div>
         ) : null}
-        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' && activeTab?.mode !== 'terminal' ? activeNonChatContent : null}
+        {hasWalkthroughTab ? (
+          <div className={cn('absolute inset-0', activeTab?.mode === 'walkthrough' ? 'block' : 'hidden')}>
+            <React.Suspense fallback={null}>
+              <WalkthroughView directory={effectiveDirectory} />
+            </React.Suspense>
+          </div>
+        ) : null}
+        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' && activeTab?.mode !== 'terminal' && activeTab?.mode !== 'walkthrough' ? activeNonChatContent : null}
       </div>
       </div>
     </aside>
