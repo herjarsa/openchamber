@@ -94,8 +94,25 @@ const classifyHealthProbeError = (error) => {
 const resolveDefaultManagedConfigDir = ({ platform = process.platform, appData = process.env.APPDATA, homedir = os.homedir, existsSyncFn = existsSync } = {}) => {
   if (platform !== 'win32') return null;
   const base = appData || path.join(homedir(), '.config');
-  const candidate = path.join(base, 'openchamber', 'managed-config');
-  return existsSyncFn(path.join(candidate, 'opencode.jsonc')) ? candidate : null;
+  // Canonicalize candidate to all-backslashes so the returned value and the
+  // probe keys match what callers (and Windows path APIs) emit. On real
+  // Windows hosts, path.join already produces backslashes, so the replace is
+  // a no-op there; it only matters on POSIX CI hosts where path.join leaves
+  // backslashes as literals in mixed-separator strings.
+  const candidate = path.join(base, 'openchamber', 'managed-config').replace(/\//g, '\\');
+  const configPath = path.join(candidate, 'opencode.jsonc');
+  // Probe all separator styles so callers can mock either form and real
+  // Windows path APIs (which normalize to backslashes) still resolve:
+  // path.join may produce mixed separators on POSIX hosts when input
+  // contains backslashes, so we canonicalize both directions.
+  if (
+    existsSyncFn(configPath)
+    || existsSyncFn(configPath.replace(/\\/g, '/'))
+    || existsSyncFn(configPath.replace(/\//g, '\\'))
+  ) {
+    return candidate;
+  }
+  return null;
 };
 
 export { resolveDefaultManagedConfigDir };
