@@ -453,12 +453,15 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
     openProjectDraft(project.id, project.path);
   }, [addProject, addedProjectPaths, openProjectDraft, t]);
 
-  const finalizeSelection = React.useCallback(async (target: string) => {
+  const finalizeSelection = React.useCallback(async (target: string, options?: { singleTarget?: boolean }) => {
     if (isConfirming) return;
     const normalized = normalizeDirectoryPath(target);
     // Batch selections supersede the single-target flow. Only the single-target
-    // flow is blocked by an already-added (or missing) directory.
-    const selectionToAdd = isCloneMode
+    // flow is blocked by an already-added (or missing) directory. Callers can
+    // force the single-target path with `options.singleTarget` (used by the
+    // Open-in-Finder flow, whose target must not be silently absorbed by a
+    // pre-existing batch).
+    const selectionToAdd = isCloneMode || options?.singleTarget
       ? []
       : selectedPaths.filter((path) => {
         const selectionNormalized = normalizeDirectoryPath(path);
@@ -556,10 +559,11 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
         return;
       }
 
-      // Clear pending selections so the Finder-sourced target is honored
-      // instead of silently being absorbed by the batch branch.
-      setSelectedPaths([]);
-      await finalizeSelection(result.path);
+      // Force the Finder-sourced target through the single-target path
+      // (singleTarget: true). Clearing selectedPaths before the call does
+      // not help: finalizeSelection closes over render-time state and
+      // selectionToAdd would still see the prior batch.
+      await finalizeSelection(result.path, { singleTarget: true });
     } catch (error) {
       toast.error(t('directoryExplorerDialog.toast.failedToSelectDirectory'), {
         description: error instanceof Error ? error.message : t('directoryExplorerDialog.toast.unknownError'),
