@@ -60,8 +60,12 @@ runtime instead:
    `RETRY_QUIET_MS` (60s) first so provider usage windows ("resets in 2min")
    can recover. Attempts are tracked in
    `metadata.openchamber.assistRetry = { count, lastMessageID, lastAttemptAt }`,
-   scoped to the failed message id — any new last assistant turn resets the
-   counter, so retries never accumulate across unrelated turns. The retry is
+   scoped to the failed message id *as an episode*: the counter is kept
+   only while every assistant turn between the recorded `lastMessageID`
+   and the current failed turn is itself a failed turn. The moment a
+   non-failed turn appears in that window the episode ends and the
+   counter resets, so retries never silently accumulate across unrelated
+   turns or after a previously exhausted failure. The retry is
    dropped if the session tail moves during the wait (the user sent a
    message) or if the session is busy again (a race with a live turn must
    never get a duplicate prompt). The provider/model/agent for the retry come

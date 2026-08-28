@@ -302,6 +302,56 @@ describe('session assist runtime — failed-turn recovery', () => {
     runtime.stop();
   });
 
+  it('resets the retry counter when a non-failed turn appears between the recorded failed turn and the current failure', async () => {
+    // Regression: a successful exchange after an exhausted episode must end
+    // the episode even when the originally recorded failed message is still
+    // inside the message tail (the recorded id is "stuck" but the episode has
+    // ended). Otherwise an exhausted failure silently exhausts every
+    // subsequent failure on the same session.
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (input, init = {}) => {
+      const url = new URL(typeof input === 'string' ? input : input.url);
+      requests.push({ path: url.pathname, method: init.method ?? 'GET', body: init.body });
+      if (url.pathname === '/session/ses_1') {
+        return json({
+          id: 'ses_1',
+          metadata: { openchamber: { assistRetry: { count: 2, lastMessageID: 'msg_old' } } },
+        });
+      }
+      if (url.pathname === '/session/status') return json(idleStatuses('ses_1'));
+      if (url.pathname === '/session/ses_1/message') {
+        // msg_old is still in the tail (OpenCode retains recent messages),
+        // but a successful msg_done appears between it and the new failure.
+        // The episode has ended; the new failure must start at count=1.
+        return json([
+          userMessage('msg_u0', 'Continue the work'),
+          emptyAssistantMessage('msg_old'),
+          userMessage('msg_u1', 'Continue the work'),
+          contentAssistantMessage('msg_done'),
+          userMessage('msg_u2', 'Continue the work'),
+          emptyAssistantMessage('msg_new'),
+        ]);
+      }
+      if (url.pathname === '/session/ses_1/prompt_async') return json({});
+      throw new Error(`Unexpected ${url.pathname}`);
+    }));
+
+    const runtime = buildRuntime();
+    await runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: 'ses_1', status: { type: 'idle' }, directory: '/repo' },
+    });
+    await waitFor(() => hasPrompt(requests));
+
+    expect(hasPrompt(requests)).toBe(true);
+    const retryPatch = requests.find((request) => request.method === 'PATCH');
+    expect(JSON.parse(retryPatch.body).metadata.openchamber.assistRetry).toMatchObject({
+      count: 1,
+      lastMessageID: 'msg_new',
+    });
+    runtime.stop();
+  });
+
   it('resets the retry counter when a non-failed turn follows', async () => {
     // Counter-reset behavior is preserved: when the recorded retry is for a
     // previous non-failed turn (a legitimate, completed exchange), the new

@@ -56,8 +56,12 @@ const IDLE_QUIET_MS = 60_000;
 // Pause between auto-retries of a failed turn: providers usually reset usage
 // windows within ~2 minutes, so a single quiet period is not enough.
 const RETRY_QUIET_MS = 60_000;
-// Hard cap on auto-retries per failed assistant turn (scoped via
-// assistRetry.lastMessageID, so a new turn resets the counter).
+// Hard cap on auto-retries per failed assistant turn. The counter is scoped
+// to an unbroken chain of failed turns (an episode): any non-failed assistant
+// turn that appears in the message tail AFTER the recorded lastMessageID
+// starts a fresh episode with count=0. This prevents a single exhausted
+// failure from silently exhausting every subsequent failure on the same
+// session.
 const FAILED_TURN_RETRY_MAX = 2;
 // Startup recovery: after the server (re)starts, OpenCode re-emits no status
 // for sessions whose turn was interrupted by the previous process dying.
@@ -225,9 +229,11 @@ const isFailedAssistantTurn = (message) => {
 };
 
 // Retry bookkeeping for failed turns, stored under
-// metadata.openchamber.assistRetry. Scoped to lastMessageID: any new last
-// assistant turn resets the counter, so retries never accumulate across
-// unrelated turns.
+// metadata.openchamber.assistRetry. The counter is scoped to an unbroken
+// chain of failed turns ("episode"): any non-failed assistant turn that
+// appears in the message tail between the recorded lastMessageID and the
+// current failed turn ends the episode and resets the counter. See
+// `handleFailedTurn` for the episode-window logic.
 const parseAssistRetry = (session) => {
   const metadata = session?.metadata && typeof session.metadata === 'object' ? session.metadata : {};
   const namespace = metadata.openchamber && typeof metadata.openchamber === 'object'
@@ -582,17 +588,31 @@ export const createSessionAssistRuntime = ({
     const lastAssistantInfo = lastAssistant?.info;
     const messageId = lastAssistantInfo.id;
     const retry = parseAssistRetry(session);
-    // Treat consecutive failed turns as a single recovery episode. If the
-    // recorded retry targets a previous turn that is itself present in the
-    // current message list AND that turn is also a failed turn, keep the
-    // counter. Without this, a persistent provider failure (which produces
-    // a fresh message id on each retry prompt) loops forever without ever
-    // reaching the documented "honest recap" state.
+    // Episode detection: the recorded `retry.lastMessageID` belongs to the
+    // *same recovery episode* as the current failed turn ONLY when every
+    // assistant turn strictly between them is itself a failed turn. The
+    // moment a non-failed assistant turn appears in that window, the
+    // episode has ended and the counter resets — otherwise an exhausted
+    // failure silently exhausts every subsequent failure on the same
+    // session.
+    //
+    // We still need the previous-turn anchor for a different reason: a
+    // persistent provider failure produces a fresh message id on each
+    // retry prompt, so the recorded id is usually from an earlier attempt
+    // rather than the current turn. The episode window covers exactly that
+    // retry chain.
     const previousTurn = retry.lastMessageID && Array.isArray(messages)
       ? messages.find((m) => m?.info?.id === retry.lastMessageID)
       : null;
-    const previousWasFailed = Boolean(previousTurn && isFailedAssistantTurn(previousTurn));
-    const scopedRetry = (retry.lastMessageID === messageId || previousWasFailed)
+    const messageList = Array.isArray(messages) ? messages : [];
+    const previousIndex = previousTurn ? messageList.indexOf(previousTurn) : -1;
+    const currentIndex = messageList.indexOf(lastAssistant);
+    const sameEpisode = previousIndex !== -1 && currentIndex !== -1 && previousIndex < currentIndex
+      ? messageList
+          .slice(previousIndex + 1, currentIndex)
+          .every((message) => !message || message?.info?.role !== 'assistant' || isFailedAssistantTurn(message))
+      : false;
+    const scopedRetry = (retry.lastMessageID === messageId || sameEpisode)
       ? retry
       : { count: 0, lastMessageID: messageId, lastAttemptAt: 0 };
 
