@@ -257,7 +257,11 @@ describe('session assist runtime — failed-turn recovery', () => {
     runtime.stop();
   });
 
-  it('resets the retry counter when the failed turn is a new message', async () => {
+  it('keeps the retry counter when consecutive turns are all failed', async () => {
+    // Regression: when a retry prompt creates a new message id and that new
+    // turn is itself empty/failed, the recovery budget must keep counting
+    // toward maxEmptyRetries. Otherwise a persistent provider failure loops
+    // every ~2 minutes forever without ever reaching the honest-recap state.
     const requests = [];
     vi.stubGlobal('fetch', vi.fn(async (input, init = {}) => {
       const url = new URL(typeof input === 'string' ? input : input.url);
@@ -266,6 +270,41 @@ describe('session assist runtime — failed-turn recovery', () => {
         return json({
           id: 'ses_1',
           metadata: { openchamber: { assistRetry: { count: 2, lastMessageID: 'msg_old' } } },
+        });
+      }
+      if (url.pathname === '/session/status') return json(idleStatuses('ses_1'));
+      if (url.pathname === '/session/ses_1/message') {
+        return json([userMessage('msg_u1', 'Continue the work'), emptyAssistantMessage('msg_new')]);
+      }
+      if (url.pathname === '/session/ses_1/prompt_async') return json({});
+      throw new Error(`Unexpected ${url.pathname}`);
+    }));
+
+    const runtime = buildRuntime();
+    await runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: 'ses_1', status: { type: 'idle' }, directory: '/repo' },
+    });
+    // Allow the runner to settle: with count=2 (>= maxEmptyRetries), the
+    // runtime must NOT issue another prompt; it must write the honest recap.
+    await sleep(150);
+
+    expect(hasPrompt(requests)).toBe(false);
+    runtime.stop();
+  });
+
+  it('resets the retry counter when a non-failed turn follows', async () => {
+    // Counter-reset behavior is preserved: when the recorded retry is for a
+    // previous non-failed turn (a legitimate, completed exchange), the new
+    // failure starts a fresh episode with count = 0.
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn(async (input, init = {}) => {
+      const url = new URL(typeof input === 'string' ? input : input.url);
+      requests.push({ path: url.pathname, method: init.method ?? 'GET', body: init.body });
+      if (url.pathname === '/session/ses_1') {
+        return json({
+          id: 'ses_1',
+          metadata: { openchamber: { assistRetry: { count: 5, lastMessageID: 'msg_done' } } },
         });
       }
       if (url.pathname === '/session/status') return json(idleStatuses('ses_1'));

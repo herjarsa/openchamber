@@ -337,7 +337,12 @@ export const createSessionAssistRuntime = ({
 
   const generateAssist = async (sessionId, directory) => {
     const targets = getSessionAssistTargets();
-    if (!targets.recap && !targets.suggestion) return;
+    // The session-assist settings gate three behaviors independently:
+    // recap and suggestion write a summary to the chat; autoRetry recovers
+    // sessions stranded on empty / unfinished replies. A user that disables
+    // recap + suggestion but keeps autoRetry on still wants the recovery
+    // path to run, so we only short-circuit when all three are off.
+    if (!targets.recap && !targets.suggestion && !targets.autoRetry) return;
     const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory })
       .catch((error) => {
         console.warn(`[session-assist] session fetch failed: ${error?.message || error}`);
@@ -577,7 +582,17 @@ export const createSessionAssistRuntime = ({
     const lastAssistantInfo = lastAssistant?.info;
     const messageId = lastAssistantInfo.id;
     const retry = parseAssistRetry(session);
-    const scopedRetry = retry.lastMessageID === messageId
+    // Treat consecutive failed turns as a single recovery episode. If the
+    // recorded retry targets a previous turn that is itself present in the
+    // current message list AND that turn is also a failed turn, keep the
+    // counter. Without this, a persistent provider failure (which produces
+    // a fresh message id on each retry prompt) loops forever without ever
+    // reaching the documented "honest recap" state.
+    const previousTurn = retry.lastMessageID && Array.isArray(messages)
+      ? messages.find((m) => m?.info?.id === retry.lastMessageID)
+      : null;
+    const previousWasFailed = Boolean(previousTurn && isFailedAssistantTurn(previousTurn));
+    const scopedRetry = (retry.lastMessageID === messageId || previousWasFailed)
       ? retry
       : { count: 0, lastMessageID: messageId, lastAttemptAt: 0 };
 

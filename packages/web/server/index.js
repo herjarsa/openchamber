@@ -387,6 +387,30 @@ const readSettingsFromDiskStrict = (...args) => settingsRuntime.readSettingsFrom
 const writeSettingsToDisk = (...args) => settingsRuntime.writeSettingsToDisk(...args);
 const persistSettings = (...args) => settingsRuntime.persistSettings(...args);
 
+// Most-recently-used directories first: OpenCode initializes each directory
+// lazily on first request (seconds on large session stores), so the lifecycle
+// warms these right after readiness — before the UI's first interactive
+// request would otherwise pay that cost. The session-assist startup recovery
+// scans the same list for sessions stranded by a serve restart.
+// Hoisted above the session-assist runtime creation so it can be referenced
+// by name there without triggering a temporal dead zone.
+const getWarmupDirectories = async () => {
+  const settings = await readSettingsFromDiskMigrated().catch(() => null);
+  if (!settings) return [];
+  const directories = [];
+  if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
+    directories.push(settings.lastDirectory);
+  }
+  const projects = Array.isArray(settings.projects) ? [...settings.projects] : [];
+  projects.sort((a, b) => (b?.lastOpenedAt ?? 0) - (a?.lastOpenedAt ?? 0));
+  for (const project of projects) {
+    if (typeof project?.path === 'string' && project.path) {
+      directories.push(project.path);
+    }
+  }
+  return [...new Set(directories)];
+};
+
 const requestSecurityRuntime = createRequestSecurityRuntime({
   readSettingsFromDiskMigrated,
 });
@@ -1121,23 +1145,6 @@ Object.defineProperties(openCodeLifecycleState, {
 // warms these right after readiness — before the UI's first interactive
 // request would otherwise pay that cost. The session-assist startup recovery
 // scans the same list for sessions stranded by a serve restart.
-const getWarmupDirectories = async () => {
-  const settings = await readSettingsFromDiskMigrated().catch(() => null);
-  if (!settings) return [];
-  const directories = [];
-  if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
-    directories.push(settings.lastDirectory);
-  }
-  const projects = Array.isArray(settings.projects) ? [...settings.projects] : [];
-  projects.sort((a, b) => (b?.lastOpenedAt ?? 0) - (a?.lastOpenedAt ?? 0));
-  for (const project of projects) {
-    if (typeof project?.path === 'string' && project.path) {
-      directories.push(project.path);
-    }
-  }
-  return [...new Set(directories)];
-};
-
 const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   state: openCodeLifecycleState,
   env: {
