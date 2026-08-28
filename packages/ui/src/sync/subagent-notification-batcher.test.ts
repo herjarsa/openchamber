@@ -3,11 +3,10 @@
  *
  * The batcher groups session.idle / session.error events from subagent sessions
  * (sessions with a parentID) and emits a single consolidated notification per
- * parent after a 1.2s debounce window. This avoids the regression where a team
- * of N subagents produces N toasts; instead the parent session sees one
- * notification carrying aggregate information.
+ * parent after a 1.2s debounce window. Per-session dedupe keeps retry cycles
+ * (error → idle for the same session) from inflating the batch.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 // Mock zustand so notification-store can be loaded without the real package.
 mock.module("zustand", () => {
@@ -35,7 +34,6 @@ mock.module("./notification-store", () => ({
 }));
 
 const { subagentNotificationBatcher } = await import("./subagent-notification-batcher");
-import type { State } from "./types";
 
 interface CapturedNotification {
   directory?: string;
@@ -43,41 +41,18 @@ interface CapturedNotification {
   time: number;
   viewed: boolean;
   type?: "turn-complete" | "error";
-  error?: { message?: string; code?: string };
+  error?: Record<string, unknown>;
 }
-
-const emptyState = (): State =>
-  ({
-    session: [],
-    message: {},
-    part: {},
-  }) as unknown as State;
 
 beforeEach(() => {
   captured.length = 0;
 });
 
-afterEach(() => {
-  // Reset batcher state between tests by waiting past the debounce window so
-  // any leftover timers fire and clear the singleton's internal maps.
-});
-
 describe("subagentNotificationBatcher", () => {
   test("emits one consolidated turn-complete notification per parent after debounce", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-2", parentID: "parent-1", type: "idle", time: 2 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-3", parentID: "parent-1", type: "idle", time: 3 },
-      getState,
-    );
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-2", parentID: "parent-1", type: "idle", time: 2 });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-3", parentID: "parent-1", type: "idle", time: 3 });
 
     // Wait past the 1.2s debounce window defined by FLUSH_MS in the batcher.
     await new Promise((resolve) => setTimeout(resolve, 1300));
@@ -88,45 +63,27 @@ describe("subagentNotificationBatcher", () => {
     expect(n.directory).toBe("/repo");
   });
 
-  test("error events produce one error notification per parent even when mixed with idle", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      {
-        directory: "/repo",
-        sessionID: "child-2",
-        parentID: "parent-1",
-        type: "error",
-        error: { message: "boom" },
-        time: 2,
-      },
-      getState,
-    );
+  test("any error in the batch produces an error notification", async () => {
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({
+      directory: "/repo",
+      sessionID: "child-2",
+      parentID: "parent-1",
+      type: "error",
+      error: { message: "boom" },
+      time: 2,
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
 
     expect(captured).toHaveLength(1);
     const n = captured[0] as CapturedNotification;
     expect(n.type).toBe("error");
-    expect(n.error?.message).toContain("1 subagent failed");
-    expect(n.error?.message).toContain("1 completed");
   });
 
   test("different parents do not coalesce into one notification", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-2", parentID: "parent-2", type: "idle", time: 1 },
-      getState,
-    );
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-2", parentID: "parent-2", type: "idle", time: 1 });
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
 
@@ -134,16 +91,8 @@ describe("subagentNotificationBatcher", () => {
   });
 
   test("different directories do not coalesce", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo-a", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo-b", sessionID: "child-2", parentID: "parent-1", type: "idle", time: 1 },
-      getState,
-    );
+    subagentNotificationBatcher.queue({ directory: "/repo-a", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({ directory: "/repo-b", sessionID: "child-2", parentID: "parent-1", type: "idle", time: 1 });
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
 
@@ -152,44 +101,89 @@ describe("subagentNotificationBatcher", () => {
     expect(dirs).toEqual(["/repo-a", "/repo-b"]);
   });
 
-  test("single error pluralizes to '1 subagent failed'", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "error", error: { message: "a" }, time: 1 },
-      getState,
-    );
+  test("retry cycle (error then idle for the same session) keeps the session counted once", async () => {
+    // A subagent that errors then idles after a retry should not appear as
+    // both an error and an idle in the batch — the latest event wins and
+    // the session is counted once.
+    subagentNotificationBatcher.queue({
+      directory: "/repo",
+      sessionID: "child-1",
+      parentID: "parent-1",
+      type: "error",
+      error: { message: "first attempt" },
+      time: 1,
+    });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 2 });
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
 
+    // The latest event (idle) wins, so the notification is turn-complete.
     expect(captured).toHaveLength(1);
     const n = captured[0] as CapturedNotification;
-    expect(n.type).toBe("error");
-    expect(n.error?.message).toBe("1 subagent failed");
+    expect(n.type).toBe("turn-complete");
+    expect(n.session).toBe("child-1");
   });
 
-  test("multiple errors pluralize and report completed count", async () => {
-    const getState = () => emptyState();
-
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "error", error: { message: "a" }, time: 1 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-2", parentID: "parent-1", type: "error", error: { message: "b" }, time: 2 },
-      getState,
-    );
-    subagentNotificationBatcher.queue(
-      { directory: "/repo", sessionID: "child-3", parentID: "parent-1", type: "idle", time: 3 },
-      getState,
-    );
+  test("retry cycle that ends in error counts the session as one error", async () => {
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({
+      directory: "/repo",
+      sessionID: "child-1",
+      parentID: "parent-1",
+      type: "error",
+      error: { message: "final" },
+      time: 2,
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 1300));
 
     expect(captured).toHaveLength(1);
     const n = captured[0] as CapturedNotification;
     expect(n.type).toBe("error");
-    expect(n.error?.message).toContain("2 subagents failed");
-    expect(n.error?.message).toContain("1 completed");
+    expect(n.session).toBe("child-1");
+  });
+
+  test("subsequent events extend the debounce window toward the fixed deadline", async () => {
+    // First event at t=0 schedules flush at t=1200. Second event at t=500
+    // reschedules the timer to fire at the same fixed deadline (t=1200),
+    // not later. We verify the second event is included in the batch by
+    // flushing at 1300ms and confirming both sessions are represented.
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-2", parentID: "parent-1", type: "idle", time: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(captured).toHaveLength(1);
+    expect((captured[0] as CapturedNotification).type).toBe("turn-complete");
+  });
+
+  test("representative session is the first error when present, otherwise first idle", async () => {
+    // Mix of idle and error events. The representative session (used as the
+    // notification.session field) should be the first errored session.
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "idle-A", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({
+      directory: "/repo",
+      sessionID: "error-B",
+      parentID: "parent-1",
+      type: "error",
+      error: { message: "b" },
+      time: 2,
+    });
+    subagentNotificationBatcher.queue({
+      directory: "/repo",
+      sessionID: "error-C",
+      parentID: "parent-1",
+      type: "error",
+      error: { message: "c" },
+      time: 3,
+    });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "idle-D", parentID: "parent-1", type: "idle", time: 4 });
+
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+
+    expect(captured).toHaveLength(1);
+    const n = captured[0] as CapturedNotification;
+    expect(n.type).toBe("error");
+    expect(n.session).toBe("error-B");
   });
 });

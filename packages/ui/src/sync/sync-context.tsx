@@ -1770,17 +1770,14 @@ export function handleEvent(
         // Route subtask events through the batcher — it groups sibling
         // subagents that share a parent and emits a single consolidated
         // notification per parent after a 1.2s debounce window.
-        subagentNotificationBatcher.queue(
-          {
-            directory: resolvedDirectory,
-            sessionID,
-            parentID: (session as { parentID?: string }).parentID!,
-            type: payload.type === "session.error" ? "error" : "idle",
-            ...(payload.type === "session.error" ? { error: props.error } : {}),
-            time: Date.now(),
-          },
-          () => store.getState(),
-        )
+        subagentNotificationBatcher.queue({
+          directory: resolvedDirectory,
+          sessionID,
+          parentID: (session as { parentID?: string }).parentID!,
+          type: payload.type === "session.error" ? "error" : "idle",
+          ...(payload.type === "session.error" ? { error: props.error } : {}),
+          time: Date.now(),
+        })
       } else {
         // Top-level sessions use the existing direct notification flow.
         appendNotification({
