@@ -3,7 +3,7 @@ import { parseSseEventEnvelope } from './protocol.js';
 export const DEFAULT_UPSTREAM_STALL_TIMEOUT_MS = 20_000;
 export const UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS = DEFAULT_UPSTREAM_STALL_TIMEOUT_MS * 3;
 export const DEFAULT_UPSTREAM_RECONNECT_DELAY_MS = 250;
-export const DEFAULT_UPSTREAM_RECONNECT_MAX_DELAY_MS = 30_000;
+export const DEFAULT_UPSTREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 export const DEFAULT_UPSTREAM_RECONNECT_BACKOFF_MULTIPLIER = 2;
 const INITIAL_RECONNECT_DELAY_MS = 0;
 
@@ -14,7 +14,10 @@ function resolveReconnectDelay(consecutiveFailures, baseMs, maxMs, multiplier) {
   if (safeBase <= 0) {
     return INITIAL_RECONNECT_DELAY_MS;
   }
-  const exponent = Math.min(consecutiveFailures, 30);
+  // Conventional exponential backoff: first failure waits `base`, then `base * multiplier`,
+  // `base * multiplier^2`, etc., capped at `max`. The counter passed in is incremented BEFORE this
+  // call (so the first failure uses counter = 1 and waits `base * multiplier^0` = base).
+  const exponent = Math.min(Math.max(consecutiveFailures - 1, 0), 30);
   const candidate = safeBase * Math.pow(safeMultiplier, exponent);
   return Math.min(candidate, safeMax);
 }

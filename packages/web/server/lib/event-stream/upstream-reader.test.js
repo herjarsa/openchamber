@@ -317,8 +317,8 @@ describe("createUpstreamSseReader", () => {
 
     expect(errors).toHaveLength(4);
     expect(attempt).toBe(5);
-    // Expected wait: 20 + 40 + 40 + 40 = 140ms minimum (first failure = 10*2, then capped at 40)
-    expect(elapsed).toBeGreaterThanOrEqual(100);
+    // Conventional backoff: first failure waits base (10ms), then 20, 40, 40 (capped) = 110ms minimum
+    expect(elapsed).toBeGreaterThanOrEqual(80);
   });
 
   it("resets the consecutive failure counter after a successful connect", async () => {
