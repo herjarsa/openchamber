@@ -1449,17 +1449,16 @@ export const McpPage: React.FC = () => {
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className={SETTINGS_FIELD_LABEL_CLASS}>{t('settings.mcp.page.status.runtimeStatus')}</span>
                     <StatusBadge status={effectiveRuntimeStatus?.status} enabled={enabled} getStatusLabel={getStatusLabel} />
-                  <div className="flex items-center gap-2">
-                {selectedServer?.scope && (
-                  <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${
-                    selectedServer.scope === 'user'
-                      ? 'bg-warning/15 text-warning-foreground border border-warning/30'
-                      : 'bg-info/15 text-info-foreground border border-info/30'
-                  }`}>
-                    {t(selectedServer.scope === 'user' ? 'settings.common.scope.global' : 'settings.common.scope.project')}
-                  </span>
-                )}
-              </div></div>
+                    {selectedServer?.scope && (
+                      <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${
+                        selectedServer.scope === 'user'
+                          ? 'bg-warning/15 text-warning-foreground border border-warning/30'
+                          : 'bg-info/15 text-info-foreground border border-info/30'
+                      }`}>
+                        {t(selectedServer.scope === 'user' ? 'settings.common.scope.global' : 'settings.common.scope.project')}
+                      </span>
+                    )}
+                  </div>
                   <p className="typography-meta text-muted-foreground">{runtimeDescription}</p>
                   <p className="typography-micro text-muted-foreground/80">
                     {draftScope === 'project'
