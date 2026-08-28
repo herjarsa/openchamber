@@ -274,9 +274,18 @@ describe('session assist runtime — failed-turn recovery', () => {
       }
       if (url.pathname === '/session/status') return json(idleStatuses('ses_1'));
       if (url.pathname === '/session/ses_1/message') {
-        return json([userMessage('msg_u1', 'Continue the work'), emptyAssistantMessage('msg_new')]);
+        // The previous failed turn (msg_old) is still in the tail: that is
+        // the realistic case — recovery prompts run every ~2 minutes and
+        // OpenCode retains recent messages. The recorded lastMessageID points
+        // at msg_old, which is itself a failed turn, so the recovery budget
+        // must keep counting toward maxEmptyRetries instead of resetting.
+        return json([
+          userMessage('msg_u0', 'Continue the work'),
+          emptyAssistantMessage('msg_old'),
+          userMessage('msg_u1', 'Continue the work'),
+          emptyAssistantMessage('msg_new'),
+        ]);
       }
-      if (url.pathname === '/session/ses_1/prompt_async') return json({});
       throw new Error(`Unexpected ${url.pathname}`);
     }));
 
