@@ -126,6 +126,39 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     });
   };
 
+  const killProcessOnPortWin32 = (port) => {
+    try {
+      // Get-NetTCPConnection reads the same locale-independent WinNT API
+      // netstat's display layer translates (e.g. "LISTENING" renders as
+      // "ABH├ûREN"/"├ëCOUTE"/"ESCUTANDO" on non-English Windows), so this
+      // works regardless of the OS display language.
+      const result = spawnSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Get-NetTCPConnection -State Listen -LocalPort ${Number.parseInt(port, 10)} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess`,
+        ],
+        { encoding: 'utf8', timeout: 5000, windowsHide: true }
+      );
+      const output = result.stdout || '';
+      const myPid = process.pid;
+      const pids = new Set();
+      for (const line of output.split(/\r?\n/)) {
+        const pid = Number.parseInt(line.trim(), 10);
+        if (pid && pid !== myPid) pids.add(pid);
+      }
+      for (const pid of pids) {
+        try {
+          spawnSync('taskkill', ['/PID', String(pid), '/F'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
+        } catch {
+        }
+      }
+    } catch {
+    }
+  };
+
   const killProcessOnPort = (port) => {
     if (!port) return;
     if (process.platform === 'win32') {
