@@ -53,6 +53,7 @@ import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
+import { subagentNotificationBatcher } from "./subagent-notification-batcher"
 import {
   applyGlobalSessionStatusEvent,
   applyGlobalSessionStatusEvents,
@@ -1760,21 +1761,38 @@ export function handleEvent(
   if (payload.type === "session.idle" || payload.type === "session.error") {
     const props = payload.properties as { sessionID?: string; error?: { message?: string; code?: string } }
     const sessionID = props.sessionID
-    // Skip subtask sessions — only top-level sessions generate notifications
     const storeState = getDirectoryEventState(store, batch)
-    const session = storeState.session.find((s) => s.id === sessionID)
-    if (session && (session as { parentID?: string }).parentID) {
-      // subtask — skip notification
-    } else if (sessionID) {
-      appendNotification({
-        directory: resolvedDirectory,
-        session: sessionID,
-        time: Date.now(),
-        viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
-        ...(payload.type === "session.error"
-          ? { type: "error" as const, error: props.error }
-          : { type: "turn-complete" as const }),
-      })
+    const session = sessionID ? storeState.session.find((s) => s.id === sessionID) : undefined
+    const isSubtask = Boolean(session && (session as { parentID?: string }).parentID)
+
+    if (sessionID) {
+      if (isSubtask) {
+        // Route subtask events through the batcher — it groups sibling
+        // subagents that share a parent and emits a single consolidated
+        // notification per parent after a 1.2s debounce window.
+        subagentNotificationBatcher.queue(
+          {
+            directory: resolvedDirectory,
+            sessionID,
+            parentID: (session as { parentID?: string }).parentID!,
+            type: payload.type === "session.error" ? "error" : "idle",
+            ...(payload.type === "session.error" ? { error: props.error } : {}),
+            time: Date.now(),
+          },
+          () => store.getState(),
+        )
+      } else {
+        // Top-level sessions use the existing direct notification flow.
+        appendNotification({
+          directory: resolvedDirectory,
+          session: sessionID,
+          time: Date.now(),
+          viewed: isViewedInCurrentSession(resolvedDirectory, sessionID),
+          ...(payload.type === "session.error"
+            ? { type: "error" as const, error: props.error }
+            : { type: "turn-complete" as const }),
+        })
+      }
     }
   }
 
