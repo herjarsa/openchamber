@@ -3,8 +3,8 @@ import { parseSseEventEnvelope } from './protocol.js';
 export const DEFAULT_UPSTREAM_STALL_TIMEOUT_MS = 20_000;
 export const UPSTREAM_STALL_TIMEOUT_CONCURRENT_MS = DEFAULT_UPSTREAM_STALL_TIMEOUT_MS * 3;
 export const DEFAULT_UPSTREAM_RECONNECT_DELAY_MS = 250;
-export const DEFAULT_UPSTREAM_RECONNECT_MAX_DELAY_MS = 5_000;
-export const DEFAULT_UPSTREAM_RECONNECT_BACKOFF_MULTIPLIER = 2;
+const DEFAULT_UPSTREAM_RECONNECT_MAX_DELAY_MS = 5_000;
+const DEFAULT_UPSTREAM_RECONNECT_BACKOFF_MULTIPLIER = 2;
 const INITIAL_RECONNECT_DELAY_MS = 0;
 
 function resolveReconnectDelay(consecutiveFailures, baseMs, maxMs, multiplier) {
@@ -27,7 +27,7 @@ function resolveTimeoutMs(value, fallback) {
   return Number.isFinite(resolved) ? resolved : fallback;
 }
 
-function waitForReconnectDelay(ms, signal) {
+function waitForReconnectDelay(ms, signal, setTimeoutImpl = globalThis.setTimeout) {
   if (signal?.aborted) {
     return Promise.resolve();
   }
@@ -40,7 +40,7 @@ function waitForReconnectDelay(ms, signal) {
       signal?.removeEventListener('abort', onAbort);
       resolve();
     };
-    const timeout = setTimeout(finish, Math.max(0, ms));
+    const timeout = setTimeoutImpl(finish, Math.max(0, ms));
     const onAbort = () => {
       clearTimeout(timeout);
       finish();
@@ -74,6 +74,7 @@ export function createUpstreamSseReader({
   reconnectDelayMs = DEFAULT_UPSTREAM_RECONNECT_DELAY_MS,
   reconnectMaxDelayMs = DEFAULT_UPSTREAM_RECONNECT_MAX_DELAY_MS,
   reconnectBackoffMultiplier = DEFAULT_UPSTREAM_RECONNECT_BACKOFF_MULTIPLIER,
+  setTimeoutImpl = globalThis.setTimeout,
   onEvent,
   onConnect,
   onDisconnect,
@@ -172,7 +173,7 @@ export function createUpstreamSseReader({
               reconnectMaxDelayMs,
               reconnectBackoffMultiplier,
             );
-            await waitForReconnectDelay(delay, signal);
+            await waitForReconnectDelay(delay, signal, setTimeoutImpl);
             continue;
           }
 
@@ -255,7 +256,7 @@ export function createUpstreamSseReader({
             reconnectMaxDelayMs,
             reconnectBackoffMultiplier,
           );
-          await waitForReconnectDelay(delay, signal);
+          await waitForReconnectDelay(delay, signal, setTimeoutImpl);
         }
       }
     })().finally(() => {
