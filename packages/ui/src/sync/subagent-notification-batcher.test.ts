@@ -24,6 +24,22 @@ mock.module("zustand", () => {
   };
 });
 
+// Intercept useUIStore directly (it transitively imports zod, etc. via
+// lib/desktop.ts, which is not present in the test worktree's
+// node_modules). The gate we test only reads notifyOnSubtasks.
+let mockNotifyOnSubtasks = true;
+mock.module("@/stores/useUIStore", () => ({
+  useUIStore: {
+    getState: () => ({ notifyOnSubtasks: mockNotifyOnSubtasks }),
+  },
+}));
+
+// Persist middleware: useUIStore imports zustand/middleware in its store
+// definition; mock it so the store can be loaded under bun:test.
+mock.module("zustand/middleware", () => ({
+  persist: (fn: unknown) => fn,
+}));
+
 // Capture notifications appended during the test.
 const captured: unknown[] = [];
 
@@ -185,5 +201,17 @@ describe("subagentNotificationBatcher", () => {
     const n = captured[0] as CapturedNotification;
     expect(n.type).toBe("error");
     expect(n.session).toBe("error-B");
+  });
+
+  test("does not queue or flush when notifyOnSubtasks is false", async () => {
+    // The user's Settings → Notifications → "Subagent Completion" is off;
+    // the batcher must suppress every call (routing gate + flush gate).
+    mockNotifyOnSubtasks = false;
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-1", parentID: "parent-1", type: "idle", time: 1 });
+    subagentNotificationBatcher.queue({ directory: "/repo", sessionID: "child-2", parentID: "parent-1", type: "error", error: { message: "boom" }, time: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    mockNotifyOnSubtasks = true;
+
+    expect(captured).toHaveLength(0);
   });
 });

@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { appendNotification } from './notification-store'
+import { useUIStore } from '@/stores/useUIStore'
 
 export type SubagentEvent = {
   directory: string
@@ -36,6 +37,11 @@ class SubagentNotificationBatcher {
   private firstSeen = new Map<BatchKey, number>()
 
   queue(event: SubagentEvent): void {
+    // Defense-in-depth: the routing site in sync-context already checks
+    // notifyOnSubtasks before calling queue(), but re-check here so a
+    // direct caller (or future refactor) cannot bypass the user's setting.
+    if (useUIStore.getState().notifyOnSubtasks === false) return;
+
     const key: BatchKey = `${event.directory}:${event.parentID}`
     const now = Date.now()
 
@@ -75,6 +81,10 @@ class SubagentNotificationBatcher {
     this.timers.delete(key)
     this.firstSeen.delete(key)
 
+    // If the user toggled "Subagent Completion" off during the 1.2s debounce
+    // window, drop the queued events without emitting a notification.
+    if (useUIStore.getState().notifyOnSubtasks === false) return;
+
     if (batch.bySession.size === 0) return
 
     let errorCount = 0
@@ -94,7 +104,6 @@ class SubagentNotificationBatcher {
 
     const hasError = errorCount > 0
     const representativeSession = firstErrorSession ?? firstIdleSession
-
     if (!representativeSession) return
 
     // Error wins over idle for the consolidated type, but the notification

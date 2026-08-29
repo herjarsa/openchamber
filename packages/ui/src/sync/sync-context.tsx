@@ -50,6 +50,7 @@ import {
 } from "./vscode-permission-auto-accept"
 import { useConfigStore } from "@/stores/useConfigStore"
 import { useTodosPersistStore } from "@/stores/useTodosPersistStore"
+import { useUIStore } from "@/stores/useUIStore"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
 import { appendNotification } from "./notification-store"
@@ -1767,6 +1768,11 @@ export function handleEvent(
 
     if (sessionID) {
       if (isSubtask) {
+        // Respect the user's "Subagent Completion" setting — when disabled, the
+        // subagent notification path (routing + batcher) is suppressed entirely
+        // so the notification store never receives an entry and tray/dock
+        // badges stay empty.
+        if (useUIStore.getState().notifyOnSubtasks === false) return;
         // Route subtask events through the batcher — it groups sibling
         // subagents that share a parent and emits a single consolidated
         // notification per parent after a 1.2s debounce window.
