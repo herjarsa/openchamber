@@ -813,37 +813,55 @@ export const registerOpenCodeProxy = (app, deps) => {
         // slow under heavy storage contention (large opencode.db, concurrent
         // TUI instances), so serial fetches multiply the wall time. The total
         // wait is bounded by the slowest project, not the sum.
+        //
+        // Each project tries ALL three Windows path spellings in turn (the
+        // base behavior — different spellings can return different sessions
+        // because path normalization on the server is not always idempotent
+        // across symlinks and drive casing) and unions the results so a single
+        // spelling returning empty does not silently hide sessions that
+        // another spelling would have surfaced. Only non-null reads count
+        // toward the 504 gate; a 500/upstream error on a single spelling must
+        // not masquerade as authoritative empty success. The successful-read
+        // counter increments up to 3 per directory, matching the base
+        // accounting.
         const projectFetches = projectDirs.map(async (dir) => {
           const candidates = Array.from(new Set([
             dir,
             dir.replace(/\\/g, '/'),
             dir.replace(/\//g, '\\'),
           ]));
+          const collected = [];
+          let nonNullReads = 0;
           for (const candidateDir of candidates) {
             const encoded = encodeURIComponent(candidateDir);
             try {
               const dirSessions = await fetchWindowsSessionList(`/session?directory=${encoded}`);
-              return { ok: true, dirSessions: dirSessions || [] };
+              if (dirSessions !== null) nonNullReads += 1;
+              if (Array.isArray(dirSessions)) {
+                for (const session of dirSessions) {
+                  if (session && typeof session.id === 'string') {
+                    collected.push(session);
+                  }
+                }
+              }
             } catch {
               // try the next path variant
             }
           }
-          return { ok: false, dirSessions: [] };
+          return { nonNullReads, collected };
         });
         const projectResults = await Promise.all(projectFetches);
         const extraSessions = [];
         let successfulProjectReads = 0;
-        for (const { ok, dirSessions } of projectResults) {
-          if (ok) successfulProjectReads += 1;
-          for (const session of dirSessions) {
-            const id = session && typeof session.id === 'string' ? session.id : null;
-            if (id && !seen.has(id)) {
-              seen.add(id);
+        for (const { nonNullReads, collected } of projectResults) {
+          successfulProjectReads += nonNullReads;
+          for (const session of collected) {
+            if (!seen.has(session.id)) {
+              seen.add(session.id);
               extraSessions.push(session);
             }
           }
         }
-
         if (!globalSessions && successfulProjectReads === 0) {
           return res.status(504).json({ error: 'OpenCode session list timed out' });
         }
